@@ -14,6 +14,9 @@ use loader::{EnclaveBuilder, ErasedTcs};
 use std::fmt;
 use std::os::raw::c_void;
 use usercalls::EnclaveState;
+use futures::prelude::*;
+use futures::prelude::await;
+
 
 pub struct Library {
     enclave: Arc<EnclaveState>,
@@ -60,6 +63,7 @@ impl Library {
     ///
     /// The caller must ensure that the parameters passed-in match what the
     /// enclave is expecting.
+    //#[async]
     pub unsafe fn call(
         &self,
         p1: u64,
@@ -68,6 +72,7 @@ impl Library {
         p4: u64,
         p5: u64,
     ) -> Result<(u64, u64), Error> {
-        EnclaveState::library_entry(&self.enclave, p1, p2, p3, p4, p5)
+        let enclave_clone = self.enclave.clone();
+        EnclaveState::library_entry(enclave_clone, p1, p2, p3, p4, p5).wait()
     }
 }

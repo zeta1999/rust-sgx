@@ -12,6 +12,8 @@ use sgxs::loader::{Load, MappingInfo};
 use loader::{EnclaveBuilder, ErasedTcs};
 use std::os::raw::c_void;
 use usercalls::EnclaveState;
+use futures::prelude::*;
+use futures::prelude::await;
 
 #[derive(Debug)]
 pub struct Command {
@@ -49,6 +51,6 @@ impl Command {
     }
 
     pub fn run(self) -> Result<(), Error> {
-        EnclaveState::main_entry(self.main, self.threads)
+        EnclaveState::main_entry(self.main, self.threads).wait()
     }
 }

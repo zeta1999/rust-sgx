@@ -5,6 +5,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #![feature(asm)]
+#![feature(proc_macro, generators, await_macro, custom_attribute)]
+
 #![doc(html_logo_url = "https://edp.fortanix.com/img/docs/edp-logo.svg",
        html_favicon_url = "https://edp.fortanix.com/favicon.ico",
        html_root_url = "https://edp.fortanix.com/docs/api/")]
@@ -20,6 +22,7 @@ extern crate fnv;
 extern crate fortanix_sgx_abi;
 #[macro_use]
 extern crate lazy_static;
+extern crate futures_await as futures;
 
 mod command;
 mod library;

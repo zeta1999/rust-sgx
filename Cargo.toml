@@ -15,3 +15,6 @@ members = [
 	"sgxs-tools"
 ]
 exclude = ["examples"]
+
+[patch.crates-io]
+futures-await = {git = 'https://github.com/vorot93/futures-await', branch='master'}

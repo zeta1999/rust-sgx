@@ -4,40 +4,53 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+//extern crate futures_await as futures;
+
 use std;
 use std::cell::RefCell;
 
 use sgx_isa::Enclu;
 use sgxs::loader::Tcs;
 use usercalls::abi::DispatchResult;
+use futures::prelude::await;
+use futures::prelude::*;
+
+use failure::Error;
+use usercalls::abi::Register;
+use usercalls::EnclaveAbort;
 
 pub(crate) type DebugBuffer = [u8; 1024];
 
-pub(crate) fn enter<T: Tcs, F>(
+#[async]
+pub(crate) fn enter<T: Tcs, F: 'static, R, S: 'static>(
     tcs: T,
+    mut state: S,
     mut on_usercall: F,
     p1: u64,
     p2: u64,
     p3: u64,
     p4: u64,
     p5: u64,
-    debug_buf: Option<&RefCell<DebugBuffer>>,
-) -> (T, DispatchResult)
+    //debug_buf: Option<&RefCell<DebugBuffer>>,
+) ->  Result<(T, S, DispatchResult), Error >
 where
-    F: FnMut(u64, u64, u64, u64, u64) -> DispatchResult,
+    F: FnMut(&mut S, u64, u64, u64, u64, u64) -> R,
+    R: Future<Item = (Register, Register), Error = EnclaveAbort<bool>>
 {
-    let mut result = coenter(tcs, p1, p2, p3, p4, p5, debug_buf);
+//    let mut result = coenter(tcs, p1, p2, p3, p4, p5, debug_buf);
+    let mut result = coenter(tcs, p1, p2, p3, p4, p5);
 
     while let CoResult::Yield(usercall) = result {
         let (p1, p2, p3, p4, p5) = usercall.parameters();
-        result = match on_usercall(p1, p2, p3, p4, p5) {
-            Ok(ret) => usercall.coreturn(ret, debug_buf),
-            Err(err) => return (usercall.tcs, Err(err)),
+        result = match await!(on_usercall(&mut state, p1, p2, p3, p4, p5)) {
+            Ok(ret) => usercall.coreturn(ret),
+//            Ok(ret) => usercall.coreturn(ret, debug_buf),
+            Err(err) => return Ok((usercall.tcs, state, Err(err))),
         }
     }
 
     match result {
-        CoResult::Return((tcs, v1, v2)) => (tcs, Ok((v1, v2))),
+        CoResult::Return((tcs, v1, v2)) => Ok((tcs, state, Ok((v1, v2)))),
         CoResult::Yield(_) => unreachable!(),
     }
 }
@@ -64,9 +77,10 @@ impl<T: Tcs> Usercall<T> {
     pub fn coreturn(
         self,
         retval: (u64, u64),
-        debug_buf: Option<&RefCell<DebugBuffer>>,
+        //debug_buf: Option<&RefCell<DebugBuffer>>,
     ) -> ThreadResult<T> {
-        coenter(self.tcs, 0, retval.0, retval.1, 0, 0, debug_buf)
+        coenter(self.tcs, 0, retval.0, retval.1, 0, 0)
+//        coenter(self.tcs, 0, retval.0, retval.1, 0, 0, debug_buf)
     }
 }
 
@@ -77,12 +91,13 @@ pub(crate) fn coenter<T: Tcs>(
     mut p3: u64,
     mut p4: u64,
     mut p5: u64,
-    debug_buf: Option<&RefCell<DebugBuffer>>,
+//    debug_buf: Option<&RefCell<DebugBuffer>>,
 ) -> ThreadResult<T> {
     let sgx_result: u32;
     let mut _tmp: (u64, u64);
 
     unsafe {
+        let debug_buf :Option<&RefCell<DebugBuffer>> = None;
         let mut uninit_debug_buf: DebugBuffer;
         let debug_buf = debug_buf.map(|r| r.borrow_mut());
         let debug_buf = match debug_buf {

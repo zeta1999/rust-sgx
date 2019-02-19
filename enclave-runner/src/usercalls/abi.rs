@@ -15,7 +15,7 @@ use fortanix_sgx_abi::*;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-type Register = u64;
+pub type Register = u64;
 
 trait RegisterArgument {
     fn from_register(Register) -> Self;

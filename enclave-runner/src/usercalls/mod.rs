@@ -3,7 +3,8 @@
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-
+//extern crate futures_await as futures;
+//use futures::prelude::*;
 extern crate libc;
 extern crate nix;
 
@@ -27,6 +28,11 @@ use fnv::FnvHashMap;
 use fortanix_sgx_abi::*;
 
 use sgxs::loader::Tcs as SgxsTcs;
+use futures::prelude::*;
+use futures::prelude::await;
+use futures::future::result;
+//use futures::executor::spawn;
+
 lazy_static! {
     static ref DEBUGGER_TOGGLE_SYNC: Mutex<()> = Mutex::new(());
 }
@@ -44,6 +50,7 @@ use tcs;
 const EV_ABORT: u64 = 0b0000_0000_0000_1000;
 
 struct ReadOnly<R>(R);
+
 struct WriteOnly<W>(W);
 
 macro_rules! forward {
@@ -128,8 +135,8 @@ impl<'a> SharedStream<'a> for io::Stderr {
 }
 
 impl<S: 'static + Send + Sync> SyncStream for S
-where
-    for<'a> &'a S: Read + Write,
+    where
+            for<'a> &'a S: Read + Write,
 {
     fn read(&self, buf: &mut [u8]) -> IoResult<usize> {
         Read::read(&mut { self }, buf)
@@ -322,10 +329,11 @@ impl EnclaveState {
             event_queues,
             fds: Mutex::new(fds),
             last_fd,
-            exiting: AtomicBool::new(false)
+            exiting: AtomicBool::new(false),
         })
     }
 
+    #[async]
     pub(crate) fn main_entry(
         main: ErasedTcs,
         threads: Vec<ErasedTcs>,
@@ -351,7 +359,7 @@ impl EnclaveState {
 
         let enclave = EnclaveState::new(kind, event_queues);
 
-        let main_result = RunningTcs::entry(enclave.clone(), main, EnclaveEntry::ExecutableMain);
+        let main_result = await!(RunningTcs::entry(enclave.clone(), main, EnclaveEntry::ExecutableMain));
 
         let main_panicking = match main_result {
             Err(EnclaveAbort::MainReturned) |
@@ -394,9 +402,9 @@ impl EnclaveState {
             Ok(_) => Ok(()),
         }
     }
-
-    fn thread_entry(enclave: &Arc<Self>, tcs: StoppedTcs) -> StdResult<StoppedTcs, EnclaveAbort<EnclavePanic>> {
-        RunningTcs::entry(enclave.clone(), tcs, EnclaveEntry::ExecutableNonMain)
+    #[async]
+    fn thread_entry(enclave: Arc<Self>, tcs: StoppedTcs) -> StdResult<StoppedTcs, EnclaveAbort<EnclavePanic>> {
+        await!(RunningTcs::entry(enclave.clone(), tcs, EnclaveEntry::ExecutableNonMain))
             .map(|(tcs, result)| {
                 assert_eq!(
                     result,
@@ -425,8 +433,9 @@ impl EnclaveState {
         EnclaveState::new(kind, event_queues)
     }
 
+    #[async]
     pub(crate) fn library_entry(
-        enclave: &Arc<Self>,
+        enclave: Arc<Self>,
         p1: u64,
         p2: u64,
         p3: u64,
@@ -434,14 +443,14 @@ impl EnclaveState {
         p5: u64,
     ) -> StdResult<(u64, u64), failure::Error> {
         // There is no other way than `Self::library` to get an `Arc<Self>`
-        let library = enclave.kind.as_library().unwrap();
+        //let library = enclave.kind.as_library().unwrap();
 
-        let thread = library.threads.lock().unwrap().recv().unwrap();
-        match RunningTcs::entry(
+        let thread = enclave.kind.as_library().unwrap().threads.lock().unwrap().recv().unwrap();
+        match await!(RunningTcs::entry(
             enclave.clone(),
             thread,
             EnclaveEntry::Library { p1, p2, p3, p4, p5 },
-        ) {
+        )) {
             Err(EnclaveAbort::Exit { panic }) => Err(panic.into()),
             Err(EnclaveAbort::IndefiniteWait) => {
                 bail!("This thread is waiting indefinitely without possibility of wakeup")
@@ -454,7 +463,7 @@ impl EnclaveState {
             }
             Err(EnclaveAbort::MainReturned) => unreachable!(),
             Ok((tcs, result)) => {
-                library.thread_sender.lock().unwrap().send(tcs).unwrap();
+                enclave.kind.as_library().unwrap().thread_sender.lock().unwrap().send(tcs).unwrap();
                 Ok(result)
             }
         }
@@ -503,7 +512,8 @@ enum Greg {
     RSP,
     RIP,
     EFL,
-    CSGSFS, /* Actually short cs, gs, fs, __pad0. */
+    CSGSFS,
+    /* Actually short cs, gs, fs, __pad0. */
     ERR,
     TRAPNO,
     OLDMASK,
@@ -547,6 +557,7 @@ fn trap_attached_debugger(tcs: usize) {
 
 #[allow(unused_variables)]
 impl RunningTcs {
+    #[async]
     fn entry(
         enclave: Arc<EnclaveState>,
         tcs: StoppedTcs,
@@ -561,19 +572,27 @@ impl RunningTcs {
             pending_events: Default::default(),
         };
 
-        let (tcs, result) = {
+
+        let ret = {
             let on_usercall =
-                |p1, p2, p3, p4, p5| dispatch(&mut Handler(&mut state), p1, p2, p3, p4, p5);
+                |state: &mut RunningTcs, p1, p2, p3, p4, p5| result(dispatch(&mut Handler(&mut*state), p1, p2, p3, p4, p5));
             let (p1, p2, p3, p4, p5) = match mode {
                 EnclaveEntry::Library { p1, p2, p3, p4, p5 } => (p1, p2, p3, p4, p5),
                 _ => (0, 0, 0, 0, 0),
             };
-            tcs::enter(tcs.tcs, on_usercall, p1, p2, p3, p4, p5, Some(&buf))
+            await!(tcs::enter(tcs.tcs, state, on_usercall, p1, p2, p3, p4, p5))
+//            await!(tcs::enter(tcs.tcs, on_usercall, p1, p2, p3, p4, p5, Some(&buf)))
         };
-
+        let tcs_new;
+        let state_new;
+        let result;
+        match ret {
+            Ok((tcs, state, r)) => {tcs_new = tcs; state_new = state; result = r},
+            Err(_) => unreachable!(),
+        }
         let tcs = StoppedTcs {
-            tcs,
-            event_queue: state.event_queue,
+            tcs: tcs_new,
+            event_queue: state_new.event_queue,
         };
 
         match result {
@@ -698,6 +717,7 @@ impl RunningTcs {
         Ok(self.alloc_fd(FileDesc::stream(stream)))
     }
 
+
     #[inline(always)]
     fn launch_thread(&self) -> IoResult<()> {
         let command = self
@@ -715,7 +735,7 @@ impl RunningTcs {
         let enclave = self.enclave.clone();
         let result = thread::Builder::new().spawn(move || {
             let tcs = recv.recv().unwrap();
-            let ret = EnclaveState::thread_entry(&enclave, tcs);
+            let ret = EnclaveState::thread_entry(enclave.clone(), tcs).wait();
 
             let cmd = enclave.kind.as_command().unwrap();
             let mut cmddata = cmd.data.lock().unwrap();
@@ -742,6 +762,7 @@ impl RunningTcs {
                 Err(e) => cmddata.other_reasons.push(e),
             }
         });
+
         match result {
             Ok(_join_handle) => {
                 send.send(new_tcs).unwrap();
@@ -810,7 +831,7 @@ impl RunningTcs {
                         Err(mpsc::TryRecvError::Empty) => break,
                     }
                 }
-                .expect("TCS event queue disconnected");
+                    .expect("TCS event queue disconnected");
 
                 if (ev & (EV_ABORT as u8)) != 0 {
                     // dispatch will make sure this is not returned to enclave
@@ -894,7 +915,7 @@ impl RunningTcs {
             let layout =
                 Layout::from_size_align(size, alignment).map_err(|_| IoErrorKind::InvalidInput)?;
             if size == 0 {
-                return Ok(())
+                return Ok(());
             }
             Ok(System.dealloc(ptr, layout))
         }

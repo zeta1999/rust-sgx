@@ -12,6 +12,8 @@ extern crate enclave_runner;
 extern crate failure;
 extern crate sgx_isa;
 extern crate sgxs;
+extern crate futures_await as futures;
+
 
 use failure::{Error, ResultExt};
 
@@ -19,6 +21,7 @@ use enclave_runner::EnclaveBuilder;
 use sgx_isa::{PageType, Report, SecinfoFlags, Targetinfo, Attributes, AttributesFlags, Miscselect};
 use sgxs::loader::Load;
 use sgxs::sgxs::{PageChunk, SecinfoTruncated, SgxsWrite};
+use futures::future::Future;
 
 pub struct ReportBuilder {
     enclave_bytes: Vec<u8>,
