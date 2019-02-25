@@ -17,7 +17,7 @@ use std::net::{TcpListener, TcpStream};
 use std::result::Result as StdResult;
 use std::str;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, channel, Receiver, Sender};
+use std::sync::mpsc::{self, channel, Receiver, RecvError, Sender, sync_channel, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time;
@@ -31,6 +31,7 @@ use sgxs::loader::Tcs as SgxsTcs;
 use futures::prelude::*;
 use futures::prelude::await;
 use futures::future::result;
+
 //use futures::executor::spawn;
 
 lazy_static! {
@@ -61,6 +62,14 @@ macro_rules! forward {
 	}
 }
 
+
+pub struct GlobalSyncSender{
+    //sync_sender: ,
+    mutex : Arc<Mutex<(Option<SyncSender<i32>>)>>
+}
+lazy_static! {
+    static ref ThreadSyncSender : GlobalSyncSender = GlobalSyncSender { mutex: Arc::new(Mutex::new(None))};
+}
 impl<R: Read> Read for ReadOnly<R> {
     forward!(fn read(&mut self, buf: &mut [u8]) -> IoResult<usize>);
 }
@@ -341,6 +350,11 @@ impl EnclaveState {
         let mut event_queues =
             FnvHashMap::with_capacity_and_hasher(threads.len() + 1, Default::default());
         let main = Self::event_queue_add_tcs(&mut event_queues, main);
+        let (mut sync_tx, sync_rx) = sync_channel(0);
+        unsafe {
+            let mut guard = ThreadSyncSender.mutex.lock().unwrap();
+            *guard = Some(sync_tx);
+        }
 
         let threads = threads
             .into_iter()
@@ -376,10 +390,20 @@ impl EnclaveState {
         cmddata.threads.clear();
         enclave.abort_all_threads();
 
-        while cmddata.running_secondary_threads > 0 {
-            cmddata = cmd.wait_secondary_threads.wait(cmddata).unwrap();
+//        while cmddata.running_secondary_threads > 0 {
+//            cmddata = cmd.wait_secondary_threads.wait(cmddata).unwrap();
+//        }
+
+        unsafe {
+            let mut guard = ThreadSyncSender.mutex.lock().unwrap();
+            //drop(guard.unwrap());
+            *guard = None;
         }
 
+
+        while sync_rx.recv() != Err(RecvError) {
+
+        }
         let main_result = match (main_panicking, cmddata.primary_panic_reason.take()) {
             (false, Some(reason)) => Err(reason),
             // TODO: interpret other_reasons
@@ -731,35 +755,34 @@ impl RunningTcs {
         let new_tcs = cmddata.threads.pop().ok_or(IoErrorKind::WouldBlock)?;
         cmddata.running_secondary_threads += 1;
 
+
         let (send, recv) = channel();
         let enclave = self.enclave.clone();
+
         let result = thread::Builder::new().spawn(move || {
+            let sync_sender;
+            {
+                let mut guard = ThreadSyncSender.mutex.clone();
+                let m1 = guard.lock().unwrap();
+                sync_sender = m1.clone().unwrap().clone();
+            }
             let tcs = recv.recv().unwrap();
             let ret = EnclaveState::thread_entry(enclave.clone(), tcs).wait();
 
-            let cmd = enclave.kind.as_command().unwrap();
-            let mut cmddata = cmd.data.lock().unwrap();
-            cmddata.running_secondary_threads -= 1;
-            if cmddata.running_secondary_threads == 0 {
-                cmd.wait_secondary_threads.notify_all();
-            }
+            sync_sender.send(0);
 
             match ret {
                 Ok(tcs) => {
                     // If the enclave is in the exit-state, threads are no
                     // longer able to be launched
                     if !enclave.exiting.load(Ordering::SeqCst) {
-                        cmddata.threads.push(tcs)
+
                     }
                 },
                 Err(e @ EnclaveAbort::Exit { .. }) |
-                Err(e @ EnclaveAbort::InvalidUsercall(_)) => if cmddata.primary_panic_reason.is_none() {
-                    cmddata.primary_panic_reason = Some(e)
-                } else {
-                    cmddata.other_reasons.push(e)
-                },
+                Err(e @ EnclaveAbort::InvalidUsercall(_)) => {},
                 Err(EnclaveAbort::Secondary) => {}
-                Err(e) => cmddata.other_reasons.push(e),
+                Err(e) => {}//cmddata.other_reasons.push(e),
             }
         });
 
@@ -769,12 +792,12 @@ impl RunningTcs {
                 Ok(())
             }
             Err(e) => {
-                cmddata.running_secondary_threads -= 1;
-                // We never released the lock, so if running_secondary_threads
-                // is now zero, no other thread has observed it to be non-zero.
-                // Therefore, there is no need to notify other waiters.
-
-                cmddata.threads.push(new_tcs);
+//                cmddata.running_secondary_threads -= 1;
+//                // We never released the lock, so if running_secondary_threads
+//                // is now zero, no other thread has observed it to be non-zero.
+//                // Therefore, there is no need to notify other waiters.
+//
+//                cmddata.threads.push(new_tcs);
                 Err(e)
             }
         }
