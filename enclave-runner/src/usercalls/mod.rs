@@ -31,7 +31,8 @@ use sgxs::loader::Tcs as SgxsTcs;
 use futures::prelude::*;
 use futures::prelude::await;
 use futures::future::result;
-
+use tokio::prelude::*;
+use futures::future::lazy;
 //use futures::executor::spawn;
 
 lazy_static! {
@@ -753,54 +754,55 @@ impl RunningTcs {
         let mut cmddata = command.data.lock().unwrap();
         // WouldBlock: see https://github.com/rust-lang/rust/issues/46345
         let new_tcs = cmddata.threads.pop().ok_or(IoErrorKind::WouldBlock)?;
-        cmddata.running_secondary_threads += 1;
-
-
-        let (send, recv) = channel();
         let enclave = self.enclave.clone();
 
-        let result = thread::Builder::new().spawn(move || {
+
+        let result = tokio::spawn(lazy( move || {
             let sync_sender;
             {
                 let mut guard = ThreadSyncSender.mutex.clone();
                 let m1 = guard.lock().unwrap();
                 sync_sender = m1.clone().unwrap().clone();
             }
-            let tcs = recv.recv().unwrap();
-            let ret = EnclaveState::thread_entry(enclave.clone(), tcs).wait();
+            let future = async_block!{
+                let ret = await!(EnclaveState::thread_entry(enclave.clone(), new_tcs));
+                Ok(())
+            };
+
+
 
             sync_sender.send(0);
-
-            match ret {
-                Ok(tcs) => {
-                    // If the enclave is in the exit-state, threads are no
-                    // longer able to be launched
-                    if !enclave.exiting.load(Ordering::SeqCst) {
-
-                    }
-                },
-                Err(e @ EnclaveAbort::Exit { .. }) |
-                Err(e @ EnclaveAbort::InvalidUsercall(_)) => {},
-                Err(EnclaveAbort::Secondary) => {}
-                Err(e) => {}//cmddata.other_reasons.push(e),
-            }
-        });
-
-        match result {
-            Ok(_join_handle) => {
-                send.send(new_tcs).unwrap();
-                Ok(())
-            }
-            Err(e) => {
-//                cmddata.running_secondary_threads -= 1;
-//                // We never released the lock, so if running_secondary_threads
-//                // is now zero, no other thread has observed it to be non-zero.
-//                // Therefore, there is no need to notify other waiters.
+            return future;
+//            match ret {
+//                Ok(tcs) => {
+//                    // If the enclave is in the exit-state, threads are no
+//                    // longer able to be launched
+//                    if !enclave.exiting.load(Ordering::SeqCst) {
 //
-//                cmddata.threads.push(new_tcs);
-                Err(e)
-            }
-        }
+//                    }
+//                },
+//                Err(e @ EnclaveAbort::Exit { .. }) |
+//                Err(e @ EnclaveAbort::InvalidUsercall(_)) => {},
+//                Err(EnclaveAbort::Secondary) => {}
+//                Err(e) => {}//cmddata.other_reasons.push(e),
+//            }
+        }));
+        return Ok(())
+//        match result {
+//            Ok(_join_handle) => {
+//                send.send(new_tcs).unwrap();
+//                Ok(())
+//            }
+//            Err(e) => {
+////                cmddata.running_secondary_threads -= 1;
+////                // We never released the lock, so if running_secondary_threads
+////                // is now zero, no other thread has observed it to be non-zero.
+////                // Therefore, there is no need to notify other waiters.
+////
+////                cmddata.threads.push(new_tcs);
+//                Err(e)
+//            }
+//        }
     }
 
     #[inline(always)]

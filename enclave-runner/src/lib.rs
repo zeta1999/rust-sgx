@@ -6,7 +6,7 @@
 
 #![feature(asm)]
 #![feature(proc_macro, generators, await_macro, custom_attribute)]
-
+#![feature(proc_macro_hygiene)]
 #![doc(html_logo_url = "https://edp.fortanix.com/img/docs/edp-logo.svg",
        html_favicon_url = "https://edp.fortanix.com/favicon.ico",
        html_root_url = "https://edp.fortanix.com/docs/api/")]
@@ -23,6 +23,7 @@ extern crate fortanix_sgx_abi;
 #[macro_use]
 extern crate lazy_static;
 extern crate futures_await as futures;
+extern crate tokio;
 
 mod command;
 mod library;
