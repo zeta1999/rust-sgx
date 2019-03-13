@@ -28,12 +28,14 @@ use fnv::FnvHashMap;
 use fortanix_sgx_abi::*;
 
 use sgxs::loader::Tcs as SgxsTcs;
+
 use futures::prelude::*;
-use futures::prelude::await;
-use futures::future::result;
-use tokio::prelude::*;
+//use futures::future::result;
+//use tokio::prelude::*;
 use futures::future::lazy;
 //use futures::executor::spawn;
+use futures::future::Future;
+use futures::task::SpawnExt;
 
 lazy_static! {
     static ref DEBUGGER_TOGGLE_SYNC: Mutex<()> = Mutex::new(());
@@ -46,8 +48,10 @@ use self::abi::dispatch;
 use self::interface::{Handler, OutputBuffer};
 use self::libc::*;
 use self::nix::sys::signal;
-use loader::{EnclavePanic, ErasedTcs};
-use tcs;
+use crate::loader::{EnclavePanic, ErasedTcs};
+use crate::tcs;
+use crate::usercalls::abi::Register;
+use crate::usercalls::abi::DispatchResult;
 
 const EV_ABORT: u64 = 0b0000_0000_0000_1000;
 
@@ -343,8 +347,8 @@ impl EnclaveState {
         })
     }
 
-    #[async]
-    pub(crate) fn main_entry(
+    //#[async]
+    pub(crate) async fn main_entry(
         main: ErasedTcs,
         threads: Vec<ErasedTcs>,
     ) -> StdResult<(), failure::Error> {
@@ -427,8 +431,8 @@ impl EnclaveState {
             Ok(_) => Ok(()),
         }
     }
-    #[async]
-    fn thread_entry(enclave: Arc<Self>, tcs: StoppedTcs) -> StdResult<StoppedTcs, EnclaveAbort<EnclavePanic>> {
+ //   #[async]
+    async fn thread_entry(enclave: Arc<Self>, tcs: StoppedTcs) -> StdResult<StoppedTcs, EnclaveAbort<EnclavePanic>> {
         await!(RunningTcs::entry(enclave.clone(), tcs, EnclaveEntry::ExecutableNonMain))
             .map(|(tcs, result)| {
                 assert_eq!(
@@ -458,8 +462,8 @@ impl EnclaveState {
         EnclaveState::new(kind, event_queues)
     }
 
-    #[async]
-    pub(crate) fn library_entry(
+//    #[async]
+    pub(crate) async fn library_entry(
         enclave: Arc<Self>,
         p1: u64,
         p2: u64,
@@ -579,11 +583,13 @@ fn trap_attached_debugger(tcs: usize) {
         signal::sigaction(signal::SIGTRAP, &old).unwrap();
     }
 }
-
+//async fn dispatcher (state: &'static mut RunningTcs, p1:u64, p2:u64, p3:u64, p4:u64, p5:u64) -> DispatchResult  {
+//    dispatch(&mut Handler(&mut*state), p1, p2, p3, p4, p5)
+//}
 #[allow(unused_variables)]
 impl RunningTcs {
-    #[async]
-    fn entry(
+//    #[async]
+    async fn entry(
         enclave: Arc<EnclaveState>,
         tcs: StoppedTcs,
         mode: EnclaveEntry,
@@ -597,27 +603,26 @@ impl RunningTcs {
             pending_events: Default::default(),
         };
 
+        let (tcs_new,result, state)= {
 
-        let ret = {
-            let on_usercall =
-                |state: &mut RunningTcs, p1, p2, p3, p4, p5| result(dispatch(&mut Handler(&mut*state), p1, p2, p3, p4, p5));
+            let on_usercall=  |mut state, p1, p2, p3, p4, p5|  { lazy( move |_| {
+                let ret = dispatch(&mut Handler(&mut state), p1, p2, p3, p4, p5);
+                return (ret, state);
+                }
+            )};
+            //let on_usercall = futures::compat::Compat01As03(on_usercall);
             let (p1, p2, p3, p4, p5) = match mode {
                 EnclaveEntry::Library { p1, p2, p3, p4, p5 } => (p1, p2, p3, p4, p5),
                 _ => (0, 0, 0, 0, 0),
             };
-            await!(tcs::enter(tcs.tcs, state, on_usercall, p1, p2, p3, p4, p5))
-//            await!(tcs::enter(tcs.tcs, on_usercall, p1, p2, p3, p4, p5, Some(&buf)))
+            //let r //: std::result::Result<(crate::loader::ErasedTcs, RunningTcs, std::result::Result<(Register, Register), crate::usercalls::EnclaveAbort<bool>>), failure::Error>
+            await!(tcs::enter(tcs.tcs, state,on_usercall, p1, p2, p3, p4, p5))
+            //Ok(())
         };
-        let tcs_new;
-        let state_new;
-        let result;
-        match ret {
-            Ok((tcs, state, r)) => {tcs_new = tcs; state_new = state; result = r},
-            Err(_) => unreachable!(),
-        }
+
         let tcs = StoppedTcs {
             tcs: tcs_new,
-            event_queue: state_new.event_queue,
+            event_queue: state.event_queue,
         };
 
         match result {
@@ -756,23 +761,24 @@ impl RunningTcs {
         let new_tcs = cmddata.threads.pop().ok_or(IoErrorKind::WouldBlock)?;
         let enclave = self.enclave.clone();
 
+        let mut tpoolbuilder = futures::executor::ThreadPoolBuilder::new();
+        tpoolbuilder.pool_size(2);
+        let mut tpool = tpoolbuilder.create();
 
-        let result = tokio::spawn(lazy( move || {
+        let result = tpool.unwrap().spawn( async move{
+        //let result = tokio::spawn( async move {
             let sync_sender;
             {
                 let mut guard = ThreadSyncSender.mutex.clone();
                 let m1 = guard.lock().unwrap();
                 sync_sender = m1.clone().unwrap().clone();
             }
-            let future = async_block!{
-                let ret = await!(EnclaveState::thread_entry(enclave.clone(), new_tcs));
-                Ok(())
-            };
+            let ret = await!(EnclaveState::thread_entry(enclave.clone(), new_tcs));
 
 
 
             sync_sender.send(0);
-            return future;
+            return ();
 //            match ret {
 //                Ok(tcs) => {
 //                    // If the enclave is in the exit-state, threads are no
@@ -786,8 +792,8 @@ impl RunningTcs {
 //                Err(EnclaveAbort::Secondary) => {}
 //                Err(e) => {}//cmddata.other_reasons.push(e),
 //            }
-        }));
-        return Ok(())
+        });
+        return Ok(());
 //        match result {
 //            Ok(_join_handle) => {
 //                send.send(new_tcs).unwrap();

@@ -19,8 +19,8 @@ use sgx_isa::{Attributes, AttributesFlags, Miscselect, Sigstruct};
 use sgxs::loader::{Load, MappingInfo, Tcs};
 use sgxs::sigstruct::{self, EnclaveHash, Signer};
 
-use tcs::DebugBuffer;
-use {Command, Library};
+use crate:: tcs::DebugBuffer;
+use crate::{Command, Library};
 
 enum EnclaveSource<'a> {
     Path(&'a Path),

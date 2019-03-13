@@ -10,12 +10,12 @@ use std::sync::Arc;
 use failure::Error;
 use sgxs::loader::{Load, MappingInfo};
 
-use loader::{EnclaveBuilder, ErasedTcs};
+use crate::loader::{EnclaveBuilder, ErasedTcs};
 use std::fmt;
 use std::os::raw::c_void;
-use usercalls::EnclaveState;
-use futures::prelude::*;
-use futures::prelude::await;
+use crate::usercalls::EnclaveState;
+//use futures::prelude::*;
+//use futures::prelude::await;
 
 
 pub struct Library {
@@ -73,6 +73,6 @@ impl Library {
         p5: u64,
     ) -> Result<(u64, u64), Error> {
         let enclave_clone = self.enclave.clone();
-        EnclaveState::library_entry(enclave_clone, p1, p2, p3, p4, p5).wait()
+        futures::executor::block_on(EnclaveState::library_entry(enclave_clone, p1, p2, p3, p4, p5))
     }
 }

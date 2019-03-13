@@ -11,18 +11,22 @@ use std::cell::RefCell;
 
 use sgx_isa::Enclu;
 use sgxs::loader::Tcs;
-use usercalls::abi::DispatchResult;
-use futures::prelude::await;
+use crate::usercalls::abi::DispatchResult;
 use futures::prelude::*;
 
 use failure::Error;
-use usercalls::abi::Register;
-use usercalls::EnclaveAbort;
+use crate::usercalls::abi::Register;
+use crate::usercalls::EnclaveAbort;
+use std::future::Future;
+use futures::task::Poll;
+use crate::tcs::CoResult::Yield;
+
 
 pub(crate) type DebugBuffer = [u8; 1024];
 
-#[async]
-pub(crate) fn enter<T: Tcs, F: 'static, R, S: 'static>(
+//#[async]
+
+pub(crate) fn enter<T: Tcs+Unpin, F:Unpin, R:Unpin, S: Unpin>(
     tcs: T,
     mut state: S,
     mut on_usercall: F,
@@ -31,27 +35,66 @@ pub(crate) fn enter<T: Tcs, F: 'static, R, S: 'static>(
     p3: u64,
     p4: u64,
     p5: u64,
-    //debug_buf: Option<&RefCell<DebugBuffer>>,
-) ->  Result<(T, S, DispatchResult), Error >
+) ->  impl Future<Output=(T, DispatchResult, S)>
 where
-    F: FnMut(&mut S, u64, u64, u64, u64, u64) -> R,
-    R: Future<Item = (Register, Register), Error = EnclaveAbort<bool>>
+    F: FnMut(S, u64, u64, u64, u64, u64) -> R,
+    R: Future<Output = (DispatchResult,S)>
 {
-//    let mut result = coenter(tcs, p1, p2, p3, p4, p5, debug_buf);
-    let mut result = coenter(tcs, p1, p2, p3, p4, p5);
-
-    while let CoResult::Yield(usercall) = result {
-        let (p1, p2, p3, p4, p5) = usercall.parameters();
-        result = match await!(on_usercall(&mut state, p1, p2, p3, p4, p5)) {
-            Ok(ret) => usercall.coreturn(ret),
-//            Ok(ret) => usercall.coreturn(ret, debug_buf),
-            Err(err) => return Ok((usercall.tcs, state, Err(err))),
+    struct Enclave < T:Tcs,F,R, S>
+    {
+        on_usercall: F,
+        state: Option<EnclaveState<T,R,S>>,
+    }
+    enum EnclaveState <T:Tcs,R,S>
+    {
+        CoResult{
+            result: CoResult<Usercall<T>, (T,u64,u64)>,
+            ouc_state: S
+        },
+        InUsercall {
+            future : R,
+            usercall : Usercall<T>
         }
     }
+    impl <T:Tcs+Unpin,F: Unpin, R: Unpin, S: Unpin> Future for Enclave<T,F,R,S>
+        where
+            F: FnMut(S, u64, u64, u64, u64, u64) -> R,
+            R: Future<Output = (DispatchResult,S)>
+    {
+        type Output = (T, DispatchResult, S);
+        fn poll(self: std::pin::Pin<&mut Self>, waker: &std::task::Waker) -> Poll<Self::Output> {
+            let self_ = self.get_mut();
+            loop {
+                self_.state = Some(match self_.state.take().unwrap() {
+                    EnclaveState::InUsercall { mut future, usercall } => {
+                        match std::pin::Pin::new(&mut future).poll(waker) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready((a, ouc_state)) => match a {
+                                Ok(ret) => { EnclaveState::CoResult {
+                                    result: usercall.coreturn(ret),
+                                    ouc_state
+                                    }
+                                },
+                                Err(err) => return Poll::Ready((usercall.tcs, Err(err), ouc_state)),
+                            }
+                        }
+                    }
+                    EnclaveState::CoResult{result: CoResult::Yield(usercall), ouc_state} => {
+                        let (p1, p2, p3, p4, p5) = usercall.parameters();
+                        EnclaveState::InUsercall { future: (self_.on_usercall)(ouc_state, p1, p2, p3, p4, p5), usercall }
+                    }
 
-    match result {
-        CoResult::Return((tcs, v1, v2)) => Ok((tcs, state, Ok((v1, v2)))),
-        CoResult::Yield(_) => unreachable!(),
+                    EnclaveState::CoResult{result: CoResult::Return((tcs, v1, v2)), ouc_state} => return Poll::Ready((tcs, Ok((v1, v2)), ouc_state)),
+                });
+            }
+        }
+    }
+    Enclave {
+        on_usercall,
+        state:Some(EnclaveState::CoResult {
+            result: coenter(tcs, p1, p2, p3, p4, p5),
+            ouc_state: state
+        })
     }
 }
 
