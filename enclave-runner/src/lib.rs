@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #![feature(asm)]
-#![feature(async_await, await_macro, existential_type)]
+#![feature(async_await, await_macro)]
 #![feature(proc_macro_hygiene)]
 #![feature(concat_idents)]
 

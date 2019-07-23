@@ -19,7 +19,6 @@ use std::str;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use std::sync::mpsc::{self, channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time;
@@ -268,19 +267,19 @@ impl fmt::Pointer for TcsAddress {
 
 struct StoppedTcs {
     tcs: ErasedTcs,
-    event_queue: tokio::sync::mpsc::UnboundedReceiver<u8>,
+    event_queue: Option<tokio::sync::mpsc::UnboundedReceiver<u8>>,
 }
 
-struct IOHandlerInput<'a> {
-    tcs: &'a mut RunningTcs,
+struct IOHandlerInput<'b> {
+    tcs: &'b mut RunningTcs,
     enclave: Arc<EnclaveState>,
-    work_sender: &'a crossbeam::crossbeam_channel::Sender<Work>,
+    work_sender: &'b crossbeam::crossbeam_channel::Sender<Work>,
 }
 
 struct RunningTcs {
     pending_event_set: u8,
     pending_events: VecDeque<u8>,
-    event_queue: tokio::sync::mpsc::UnboundedReceiver<u8>,
+    event_queue: Option<tokio::sync::mpsc::UnboundedReceiver<u8>>,
     mode: EnclaveEntry,
 }
 
@@ -368,7 +367,7 @@ impl EnclaveState {
         }
         StoppedTcs {
             tcs,
-            event_queue: recv,
+            event_queue: Some(recv),
         }
     }
 
@@ -458,14 +457,15 @@ impl EnclaveState {
                 match coresult {
                     CoResult::Yield(usercall) => {
                         let fut = async move {
-                            let mut handler = Handler(IOHandlerInput {
+                            let mut input = IOHandlerInput {
                                 enclave: encalve_clone.clone(),
                                 tcs: &mut state,
                                 work_sender: &work_sender_clone,
-                            });
-                            let result = {
+                            };
+                            let handler = Handler(&mut input);
+                            let (_handler, result) = {
                                 let (p1, p2, p3, p4, p5) = usercall.parameters();
-                                dispatch(&mut handler, p1, p2, p3, p4, p5).await
+                                dispatch(handler, p1, p2, p3, p4, p5).await
                             };
                             let ret = match result {
                                 Ok(ret) => {
@@ -570,7 +570,6 @@ impl EnclaveState {
             return thread_handles;
         }
 
-        let buffsize : usize = 256;
         let (io_queue_send, io_queue_receive) = tokio::sync::mpsc::unbounded_channel();
 
         let (work_sender, work_receiver) = crossbeam::crossbeam_channel::unbounded();
@@ -871,7 +870,7 @@ impl<'a> IOHandlerInput<'a> {
     }
 
     #[inline(always)]
-    fn read(&self, fd: Fd, buf: &mut [u8]) -> IoResult<usize> {
+    fn read(&self, fd: Fd, buf: &mut [u8]) -> IoResult<usize>  {
         self.lookup_fd(fd)?.as_stream()?.read(buf)
     }
 
@@ -883,7 +882,7 @@ impl<'a> IOHandlerInput<'a> {
     }
 
     #[inline(always)]
-    fn write(&self, fd: Fd, buf: &[u8]) -> IoResult<usize> {
+    fn write(&self, fd: Fd, buf: &[u8]) ->  IoResult<usize> {
         self.lookup_fd(fd)?.as_stream()?.write(buf)
     }
 
@@ -894,7 +893,7 @@ impl<'a> IOHandlerInput<'a> {
 
     #[inline(always)]
     fn close(&self, fd: Fd) {
-        self.enclave.fds.lock().unwrap().remove(&fd);
+        self.enclave.fds.lock().unwrap().remove( & fd);
     }
 
     #[inline(always)]
@@ -924,7 +923,7 @@ impl<'a> IOHandlerInput<'a> {
         fd: Fd,
         local_addr: Option<&mut OutputBuffer>,
         peer_addr: Option<&mut OutputBuffer>,
-    ) -> IoResult<Fd> {
+    ) ->  IoResult<Fd> {
         let mut local_addr_str = local_addr.as_ref().map(|_| String::new());
         let mut peer_addr_str = peer_addr.as_ref().map(|_| String::new());
 
@@ -981,7 +980,7 @@ impl<'a> IOHandlerInput<'a> {
     }
 
     #[inline(always)]
-    fn launch_thread(&self) -> IoResult<()> {
+    fn launch_thread(&self) -> IoResult<()>{
         let command = self
             .enclave
             .kind
@@ -1021,7 +1020,7 @@ impl<'a> IOHandlerInput<'a> {
         EnclaveAbort::Exit { panic }
     }
 
-    fn check_event_set(set: u64) -> IoResult<u8> {
+    fn check_event_set(set: u64) ->IoResult<u8> {
         const EV_ALL: u64 = EV_USERCALLQ_NOT_FULL | EV_RETURNQ_NOT_EMPTY | EV_UNPARK;
         if (set & !EV_ALL) != 0 {
             return Err(IoErrorKind::InvalidInput.into());
@@ -1033,7 +1032,7 @@ impl<'a> IOHandlerInput<'a> {
     }
 
     #[inline(always)]
-    async fn wait(&mut self, event_mask: u64, timeout: u64) -> IoResult<u64> {
+    async fn wait(&mut self, event_mask: u64, timeout: u64) ->  IoResult<u64> {
         let wait = match timeout {
             WAIT_NO => 0,
             WAIT_INDEFINITE => std::u64::MAX,
@@ -1057,9 +1056,15 @@ impl<'a> IOHandlerInput<'a> {
         }
 
         //let event_queue = &self.tcs.event_queue;
-
+//        if ret.is_none() {
+//                // might need a mutex
+//                while let Ok((Some(work), stream)) = self.tcs.event_queue.take().unwrap().into_future().compat().await {
+//                    self.tcs.event_queue = Some(stream);
+//                }
+//        }
+        // this is wrong. Need to do something about this
         if ret.is_none() {
-            let fut = self.tcs.event_queue.map_err(|err| {
+            let fut = self.tcs.event_queue.take().unwrap().map_err(|err| {
                 panic!("TCS event queue disconnected")
             }).for_each(|ev| {
                 if (ev & (EV_ABORT as u8)) != 0 {

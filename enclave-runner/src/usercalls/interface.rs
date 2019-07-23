@@ -16,179 +16,202 @@ use super::{EnclaveAbort, IOHandlerInput};
 use futures::future::Future;
 use crate::futures::FutureExt;
 
-pub(super) struct Handler<'a>(pub IOHandlerInput<'a>);
+pub(super) struct Handler<'a, 'b>(pub &'a mut IOHandlerInput<'b>);
 
-impl <'a> Usercalls<'a> for Handler<'a> {
-
-    fn is_exiting(&'a self) -> bool {
+impl<'a: 'b, 'b, 'c: 'a> Usercalls<'b> for Handler<'a, 'c> {
+    fn is_exiting(&self) -> bool {
         self.0.is_exiting()
     }
 
-    fn read(&'a mut self, fd: Fd, buf: *mut u8, len: usize) -> std::pin::Pin<Box<dyn Future<Output = UsercallResult<(Result, usize)>>+'a>> {
-        async {
+    fn read(self, fd: Fd, buf: *mut u8, len: usize) -> std::pin::Pin<Box<dyn Future<Output = (Self, UsercallResult<(Result, usize)>)> + 'b>> {
+        async move {
             unsafe {
-                Ok(from_raw_parts_mut_nonnull(buf, len)
+                let ret = Ok(from_raw_parts_mut_nonnull(buf, len)
                     .and_then(|buf| self.0.read(fd, buf))
-                    .to_sgx_result())
+                    .to_sgx_result());
+                return (self,ret);
             }
         }.boxed_local()
     }
 
-    fn read_alloc(&'a mut self, fd: Fd, buf: *mut ByteBuffer) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<Result>> + 'a>> {
-        async {
+    fn read_alloc(self, fd: Fd, buf: *mut ByteBuffer) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<Result>)> + 'b>> {
+        async move {
             unsafe {
-                Ok((|| {
+                let ret = Ok((|| {
                     let mut out = OutputBuffer::new(buf.as_mut().ok_or(IoErrorKind::InvalidInput)?);
                     if !out.buf.data.is_null() {
                         return Err(IoErrorKind::InvalidInput.into());
                     }
                     self.0.read_alloc(fd, &mut out)
                 })()
-                    .to_sgx_result())
+                    .to_sgx_result());
+                return (self,ret);
             }
         }.boxed_local()
     }
 
-    fn write(&'a mut self, fd: Fd, buf: *const u8, len: usize) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<(Result, usize)>> + 'a>> {
-        async {
+    fn write(self, fd: Fd, buf: *const u8, len: usize) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<(Result, usize)>)> + 'b>> {
+        async move {
             unsafe {
-                Ok(from_raw_parts_nonnull(buf, len)
+                let ret = Ok(from_raw_parts_nonnull(buf, len)
                     .and_then(|buf| self.0.write(fd, buf))
-                    .to_sgx_result())
+                    .to_sgx_result());
+                return (self,ret);
             }
         }.boxed_local()
     }
 
-    fn flush(&'a mut self, fd: Fd) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<Result>> + 'a>> {
-        async {
-            Ok(self.0.flush(fd).to_sgx_result())
+    fn flush(self, fd: Fd) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<Result>)> + 'b>> {
+        async move {
+            let ret = Ok(self.0.flush(fd).to_sgx_result());
+            return (self, ret);
         }.boxed_local()
     }
 
-    fn close(&'a mut self, fd: Fd) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<()>> + 'a>> {
-        async {
-            Ok(self.0.close(fd))
+    fn close(self, fd: Fd) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<()>)> + 'b>> {
+        async move {
+            let ret = Ok(self.0.close(fd));
+            return (self, ret);
         }.boxed_local()
     }
 
     fn bind_stream(
-        &'a mut self,
+        self,
         addr: *const u8,
         len: usize,
         local_addr: *mut ByteBuffer,
-    ) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<(Result, Fd)>> + 'a>> {
-        async {
+    ) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<(Result, Fd)>)> + 'b>> {
+        async move {
             unsafe {
                 let mut local_addr = local_addr.as_mut().map(OutputBuffer::new);
-                Ok(from_raw_parts_nonnull(addr, len)
+                let ret = Ok(from_raw_parts_nonnull(addr, len)
                     .and_then(|addr| self.0.bind_stream(addr, local_addr.as_mut()))
-                    .to_sgx_result())
+                    .to_sgx_result());
+                return (self, ret);
             }
         }.boxed_local()
     }
 
     fn accept_stream(
-        &'a mut self,
+        self,
         fd: Fd,
         local_addr: *mut ByteBuffer,
         peer_addr: *mut ByteBuffer,
-    ) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<(Result, Fd)>> + 'a>> {
-        async {
+    ) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<(Result, Fd)>)> + 'b>> {
+        async move {
             unsafe {
                 let mut local_addr = local_addr.as_mut().map(OutputBuffer::new);
                 let mut peer_addr = peer_addr.as_mut().map(OutputBuffer::new);
-                Ok(self
+                let ret = Ok(self
                     .0
                     .accept_stream(fd, local_addr.as_mut(), peer_addr.as_mut())
-                    .to_sgx_result())
+                    .to_sgx_result());
+                return (self, ret);
             }
         }.boxed_local()
     }
 
     fn connect_stream(
-        &'a mut self,
+        self,
         addr: *const u8,
         len: usize,
         local_addr: *mut ByteBuffer,
         peer_addr: *mut ByteBuffer,
-    ) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<(Result, Fd)>> + 'a>> {
-        async {
+    ) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<(Result, Fd)>)> + 'b>> {
+        async move {
             unsafe {
                 let mut local_addr = local_addr.as_mut().map(OutputBuffer::new);
                 let mut peer_addr = peer_addr.as_mut().map(OutputBuffer::new);
-                Ok(from_raw_parts_nonnull(addr, len)
+                let ret = Ok(from_raw_parts_nonnull(addr, len)
                     .and_then(|addr| {
                         self.0
                             .connect_stream(addr, local_addr.as_mut(), peer_addr.as_mut())
                     })
-                    .to_sgx_result())
+                    .to_sgx_result());
+                return (self,ret);
             }
         }.boxed_local()
     }
 
-    fn launch_thread(&'a mut self) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<Result>> + 'a>> {
-        async {
-            Ok(self.0.launch_thread().to_sgx_result())
+    fn launch_thread(self) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<Result>)> + 'b>> {
+        async move {
+            let ret = Ok(self.0.launch_thread().to_sgx_result());
+            return (self,ret);
+
         }.boxed_local()
     }
 
-    fn exit(&'a mut self, panic: bool) -> std::pin::Pin<Box<dyn Future <Output = EnclaveAbort<bool>> + 'a>> {
-        async {
-            self.0.exit(panic)
+    fn exit(self, panic: bool) -> std::pin::Pin<Box<dyn Future <Output = (Self, EnclaveAbort<bool>)> + 'b>> {
+        async move {
+            let ret = self.0.exit(panic);
+            return (self, ret);
         }.boxed_local()
     }
 
-    fn wait(&'a mut self, event_mask: u64, timeout: u64) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<(Result, u64)>> + 'a>> {
-        async {
+    fn wait(self, event_mask: u64, timeout: u64) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<(Result, u64)>)> + 'b>> {
+        async move {
             if event_mask == 0 && timeout == WAIT_INDEFINITE {
-                return Err(EnclaveAbort::IndefiniteWait);
+                return (self, Err(EnclaveAbort::IndefiniteWait));
             }
 
-            Ok(self.0.wait(event_mask, timeout).await.to_sgx_result())
+            let ret = Ok(self.0.wait(event_mask, timeout).await.to_sgx_result());
+            return (self, ret);
         }.boxed_local()
     }
 
-    fn send(&'a mut self, event_set: u64, tcs: Option<Tcs>) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<Result>> + 'a>> {
-        async {
-            Ok(self.0.send(event_set, tcs).to_sgx_result())
+    fn send(self, event_set: u64, tcs: Option<Tcs>) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<Result>)> + 'b>> {
+        async move {
+            let ret = Ok(self.0.send(event_set, tcs).to_sgx_result());
+            return (self, ret);
         }.boxed_local()
     }
 
-    fn insecure_time(&'a mut self) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<u64>> + 'a>> {
-        async {
-            Ok(self.0.insecure_time())
+    fn insecure_time(self) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<u64>)> + 'b>> {
+        async move {
+            let ret = Ok(self.0.insecure_time());
+            return (self, ret);
         }.boxed_local()
     }
 
-    fn alloc(&'a mut self, size: usize, alignment: usize) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<(Result, *mut u8)>> + 'a>> {
-        async {
-            Ok(self.0.alloc(size, alignment).to_sgx_result())
+    fn alloc(self, size: usize, alignment: usize) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<(Result, *mut u8)>)> + 'b>> {
+        async move {
+            let ret = Ok(self.0.alloc(size, alignment).to_sgx_result());
+            return (self, ret);
         }.boxed_local()
     }
 
-    fn free(&'a mut self, ptr: *mut u8, size: usize, alignment: usize) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<()>> + 'a>> {
-        async {
-            Ok(self.0.free(ptr, size, alignment).unwrap())
+    fn free(self, ptr: *mut u8, size: usize, alignment: usize) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<()>)> + 'b>> {
+        async move {
+            let ret = Ok(self.0.free(ptr, size, alignment).unwrap());
+            return (self, ret);
         }.boxed_local()
     }
 
     fn async_queues(
-        &'a mut self,
+        self,
         usercall_queue: *mut FifoDescriptor<Usercall>,
         return_queue: *mut FifoDescriptor<Return>,
-    ) -> std::pin::Pin<Box<dyn Future <Output = UsercallResult<Result>> + 'a>> {
-        async {
+    ) -> std::pin::Pin<Box<dyn Future <Output = (Self, UsercallResult<Result>)> + 'b>> {
+        async move {
             unsafe {
-                Ok((|| {
+                let ret = Ok((|| {
                     let usercall_queue = usercall_queue
                         .as_mut()
-                        .ok_or(IoError::from(IoErrorKind::InvalidInput))?;
+                        .ok_or(IoError::from(IoErrorKind::InvalidInput));
+                    if let Err(e) = usercall_queue {
+                        return Err(e);
+                    }
                     let return_queue = return_queue
                         .as_mut()
-                        .ok_or(IoError::from(IoErrorKind::InvalidInput))?;
-                    self.0.async_queues(usercall_queue, return_queue)
+                        .ok_or(IoError::from(IoErrorKind::InvalidInput));
+                    if let Err(e) = return_queue {
+                        return Err(e);
+                    }
+
+                     self.0.async_queues(usercall_queue.unwrap(), return_queue.unwrap())
                 })()
-                    .to_sgx_result())
+                    .to_sgx_result());
+                return (self, ret);
             }
         }.boxed_local()
     }
