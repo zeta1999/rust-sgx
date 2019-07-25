@@ -26,7 +26,6 @@ use std::time;
 use failure;
 use fnv::FnvHashMap;
 use tokio::prelude::Stream;
-use tokio::prelude::FutureExt as TokioFutureExt;
 use futures::future::{Either, FutureExt, TryFutureExt};
 use crate::futures::compat::Future01CompatExt;
 
@@ -267,7 +266,7 @@ impl fmt::Pointer for TcsAddress {
 
 struct StoppedTcs {
     tcs: ErasedTcs,
-    event_queue: Option<tokio::sync::mpsc::UnboundedReceiver<u8>>,
+    event_queue: futures::channel::mpsc::UnboundedReceiver<u8>,
 }
 
 struct IOHandlerInput<'b> {
@@ -279,7 +278,7 @@ struct IOHandlerInput<'b> {
 struct RunningTcs {
     pending_event_set: u8,
     pending_events: VecDeque<u8>,
-    event_queue: Option<tokio::sync::mpsc::UnboundedReceiver<u8>>,
+    event_queue: futures::channel::mpsc::UnboundedReceiver<u8>,
     mode: EnclaveEntry,
 }
 
@@ -317,7 +316,7 @@ impl EnclaveKind {
 
 pub(crate) struct EnclaveState {
     kind: EnclaveKind,
-    event_queues: FnvHashMap<TcsAddress, Mutex<tokio::sync::mpsc::UnboundedSender<u8>>>,
+    event_queues: FnvHashMap<TcsAddress, Mutex<futures::channel::mpsc::UnboundedSender<u8>>>,
     fds: Mutex<FnvHashMap<Fd, Arc<FileDesc>>>,
     last_fd: AtomicUsize,
     exiting: AtomicBool,
@@ -355,10 +354,10 @@ impl Work {
 
 impl EnclaveState {
     fn event_queue_add_tcs(
-        event_queues: &mut FnvHashMap<TcsAddress, Mutex<tokio::sync::mpsc::UnboundedSender<u8>>>,
+        event_queues: &mut FnvHashMap<TcsAddress, Mutex<futures::channel::mpsc::UnboundedSender<u8>>>,
         tcs: ErasedTcs,
     ) -> StoppedTcs {
-        let (send, recv) = tokio::sync::mpsc::unbounded_channel();
+        let (send, recv) = futures::channel::mpsc::unbounded();
         if event_queues
             .insert(tcs.address(), Mutex::new(send))
             .is_some()
@@ -367,13 +366,13 @@ impl EnclaveState {
         }
         StoppedTcs {
             tcs,
-            event_queue: Some(recv),
+            event_queue: recv,
         }
     }
 
     fn new(
         kind: EnclaveKind,
-        mut event_queues: FnvHashMap<TcsAddress, Mutex<tokio::sync::mpsc::UnboundedSender<u8>>>,
+        mut event_queues: FnvHashMap<TcsAddress, Mutex<futures::channel::mpsc::UnboundedSender<u8>>>,
         usercall_ext: Option<Box<dyn UsercallExtension>>,
         threads_vector: Vec<ErasedTcs>,
     ) -> Arc<Self> {
@@ -710,7 +709,7 @@ impl EnclaveState {
         self.exiting.store(true, Ordering::SeqCst);
         // wake other threads
         for queue in self.event_queues.values() {
-            let _ = queue.lock().unwrap().try_send(EV_ABORT as _);
+            let _ = queue.lock().unwrap().unbounded_send(EV_ABORT as _);
         }
     }
 }
@@ -1034,8 +1033,8 @@ impl<'a> IOHandlerInput<'a> {
     #[inline(always)]
     async fn wait(&mut self, event_mask: u64, timeout: u64) ->  IoResult<u64> {
         let wait = match timeout {
-            WAIT_NO => 0,
-            WAIT_INDEFINITE => std::u64::MAX,
+            WAIT_NO => false,
+            WAIT_INDEFINITE => true,
             _ => return Err(IoErrorKind::InvalidInput.into()),
         };
 
@@ -1055,41 +1054,69 @@ impl<'a> IOHandlerInput<'a> {
             }
         }
 
-        //let event_queue = &self.tcs.event_queue;
-//        if ret.is_none() {
-//                // might need a mutex
-//                while let Ok((Some(work), stream)) = self.tcs.event_queue.take().unwrap().into_future().compat().await {
-//                    self.tcs.event_queue = Some(stream);
-//                }
-//        }
-        // this is wrong. Need to do something about this
         if ret.is_none() {
-            let fut = self.tcs.event_queue.take().unwrap().map_err(|err| {
-                panic!("TCS event queue disconnected")
-            }).for_each(|ev| {
+            'outer: loop {
+                let ev =  if wait {
+                    let r;
+                    'inner: loop {
+                        match self.tcs.event_queue.try_next() {
+                            Ok(Some(ev)) => r = Ok(ev),
+                            Err(e) => continue 'inner,
+                            Ok(None) => r = Err(()),
+                        }
+                        break 'inner;
+                    }
+                    r
+                } else {
+                    match self.tcs.event_queue.try_next() {
+                        Ok(Some(ev)) => Ok(ev),
+                        Err(e) => break,
+                        Ok(None) => Err(()),
+                    }
+                }.expect("TCS event queue disconnected unexpectedly");
+
                 if (ev & (EV_ABORT as u8)) != 0 {
                     // dispatch will make sure this is not returned to enclave
-                    return Err(Err(IoErrorKind::Other.into()));
+                    return Err(IoErrorKind::Other.into());
                 }
 
                 if (ev & event_mask) != 0 {
-                    return Err(Ok(ev));
+                    ret = Some(ev);
+                    break;
                 } else {
                     self.tcs.pending_events.push_back(ev);
                     self.tcs.pending_event_set |= ev;
                 }
-                Ok(())
-            }).timeout(Duration::from_millis(wait)).compat().await;
-
-            if let Err(fut) = fut {
-                match fut.into_inner() {
-                    //tokio::timer::timeout::Error => {},
-                    Some(Err(e)) => return Err(e),
-                    Some(Ok(r)) => ret = Some(r),
-                    _ => {}
-                }
             }
         }
+
+//        if ret.is_none() {
+//            let fut = self.tcs.event_queue.try_next().map_err(|err| {
+//                panic!("TCS event queue disconnected")
+//            }).map(|ev| {
+//                if (ev & (EV_ABORT as u8)) != 0 {
+//                    // dispatch will make sure this is not returned to enclave
+//                    return Err(Err(IoErrorKind::Other.into()));
+//                }
+//
+//                if (ev & event_mask) != 0 {
+//                    return Err(Ok(ev));
+//                } else {
+//                    self.tcs.pending_events.push_back(ev);
+//                    self.tcs.pending_event_set |= ev;
+//                }
+//                Ok(())
+//            }).timeout(Duration::from_millis(wait)).compat().await;
+//
+//            if let Err(fut) = fut {
+//                match fut.into_inner() {
+//                    //tokio::timer::timeout::Error => {},
+//                    Some(Err(e)) => return Err(e),
+//                    Some(Ok(r)) => ret = Some(r),
+//                    _ => {}
+//                }
+//            }
+//        }
 
         if let Some(ret) = ret {
             Ok(ret.into())
@@ -1116,11 +1143,11 @@ impl<'a> IOHandlerInput<'a> {
             queue
                 .lock()
                 .unwrap()
-                .try_send(event_set)
+                .unbounded_send(event_set)
                 .expect("TCS event queue disconnected");
         } else {
             for queue in self.enclave.event_queues.values() {
-                let _ = queue.lock().unwrap().try_send(event_set);
+                let _ = queue.lock().unwrap().unbounded_send(event_set);
             }
         }
 
