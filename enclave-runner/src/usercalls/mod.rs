@@ -241,24 +241,32 @@ impl <S: 'static + Sync + Send > AsyncStream for S
 
 
 /// AsyncListener lets an implementation implement a slightly modified form of `std::net::TcpListener::accept`.
-pub trait AsyncListener: 'static + Send + Sync {
+pub trait AsyncListener: 'static + Send {
     /// The enclave may optionally request the local or peer addresses
     /// be returned in `local_addr` or `peer_addr`, respectively.
     /// If `local_addr` and/or `peer_addr` are not `None`, they will point to an empty `String`.
     /// On success, user-space can fill in the strings as appropriate.
     ///
     /// The enclave must not make any security decisions based on the local address received.
-    fn accept<'a>(&'a  self, local_addr: Option<&'a mut String>, peer_addr: Option<&'a mut String>) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<Box<dyn AsyncStream>>> + 'a >>;  //IoResult<Box<dyn AsyncStream>>;
+    fn accept<'a>(&'a mut self, local_addr: Option<&'a mut String>, peer_addr: Option<&'a mut String>) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<Box<dyn AsyncStream>>> + 'a >>;  //IoResult<Box<dyn AsyncStream>>;
 //    fn next(&mut self) -> futures::stream::Next<'_, Self>
 //        where Self: Unpin;
 }
 
-//impl AsyncListener for futures::compat::Compat01As03<tokio::net::tcp::Incoming> {
-impl AsyncListener for tokio::net::tcp::Incoming {
-    fn accept<'a>(&'a self, local_addr: Option<&'a mut String>, peer_addr: Option<&'a mut String>) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<Box<dyn AsyncStream>>> + 'a >> {
+struct AsyncListenerContainer {
+    inner : Mutex<Box<dyn AsyncListener>>
+}
+
+impl AsyncListenerContainer {
+    fn new<L: AsyncListener>(l: Box<L>) -> Self {
+        AsyncListenerContainer {inner: Mutex::new(l)}
+    }
+}
+
+impl AsyncListener for futures::compat::Compat01As03<tokio::net::tcp::Incoming> {
+    fn accept<'a>(&'a mut self, local_addr: Option<&'a mut String>, peer_addr: Option<&'a mut String>) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<Box<dyn AsyncStream>>> + 'a >> {
         async move {
-            let mut fut = self.compat();
-            match fut.next().await.unwrap() {
+            match self.next().await.unwrap() {
                 Err(e) => Err(e),
                 Ok(stream) => {
                     if let Some(local_addr) = local_addr {
@@ -279,7 +287,7 @@ impl AsyncListener for tokio::net::tcp::Incoming {
 
 enum AsyncFileDesc {
     Stream(Box<dyn AsyncStream>),
-    Listener(Box<dyn AsyncListener>),
+    Listener(AsyncListenerContainer),
 }
 
 impl AsyncFileDesc {
@@ -288,7 +296,8 @@ impl AsyncFileDesc {
     }
 
     fn listener<L: AsyncListener>(l: L) -> AsyncFileDesc {
-        AsyncFileDesc::Listener(Box::new(l))
+
+        AsyncFileDesc::Listener(AsyncListenerContainer::new(Box::new(l)))
     }
 
     fn as_stream(& self) -> IoResult<&dyn AsyncStream> {
@@ -299,9 +308,9 @@ impl AsyncFileDesc {
         }
     }
 
-    fn as_listener(&self) -> IoResult<&dyn AsyncListener> {
+    fn as_listener(&self) -> IoResult<&AsyncListenerContainer> {
         if let AsyncFileDesc::Listener(ref l) = self {
-            Ok(&**l)
+            Ok(l)
         } else {
             Err(IoErrorKind::InvalidInput.into())
         }
@@ -455,9 +464,6 @@ impl EnclaveState {
         threads_vector: Vec<ErasedTcs>,
     ) -> Arc<Self> {
         let mut fds = FnvHashMap::default();
-//        fds.insert(FD_STDIN, Arc::new(AsyncFileDesc::stream(Shared(ReadOnly(tokio::io::stdin())))));
-//        fds.insert(FD_STDOUT, Arc::new(AsyncFileDesc::stream(Shared(WriteOnly(tokio::io::stdout())))));
-//        fds.insert(FD_STDERR, Arc::new(AsyncFileDesc::stream(Shared(WriteOnly(tokio::io::stderr())))));
 
         fds.insert(FD_STDIN, Arc::new(AsyncFileDesc::stream(ReadOnly(tokio::io::stdin()))));
         fds.insert(FD_STDOUT, Arc::new(AsyncFileDesc::stream(WriteOnly(tokio::io::stdout()))));
@@ -999,12 +1005,12 @@ impl<'tcs> IOHandlerInput<'tcs> {
             if let Some(local_addr) = local_addr {
                 local_addr.set(local_addr_str.unwrap().into_bytes());
             }
-            let socket = stream_ext.incoming();
+            let socket = stream_ext.incoming().compat();
             return Ok(self.alloc_fd(AsyncFileDesc::listener(socket)));
         }
 
         // !!! see if there's a better way
-        let socket = tokio::net::TcpListener::bind(&addr.to_socket_addrs()?.as_mut_slice()[0])?.incoming();
+        let socket = tokio::net::TcpListener::bind(&addr.to_socket_addrs()?.as_mut_slice()[0])?.incoming().compat();
 //        if let Some(local_addr) = local_addr {
 //            local_addr.set(socket.local_addr()?.to_string().into_bytes())
 //        }
@@ -1022,7 +1028,8 @@ impl<'tcs> IOHandlerInput<'tcs> {
         let mut peer_addr_str = peer_addr.as_ref().map(|_| String::new());
 
         let file_desc = self.lookup_fd(fd)?;
-        let fut = file_desc.as_listener()?;
+        let mut fut = file_desc.as_listener()?.inner.lock().unwrap();
+
         let stream = fut.accept(local_addr_str.as_mut(), peer_addr_str.as_mut()).await.unwrap();
         if let Some(local_addr) = local_addr {
             local_addr.set(&local_addr_str.unwrap().into_bytes()[..])
