@@ -185,61 +185,94 @@ impl <'a>AsyncWrite for &'a ReadOnly<tokio::io::Stdin> {
     }
 }
 
-pub trait AsyncStream : 'static + Send + Sync {
-    fn async_read<'a> (&'a self, buf: &'a mut [u8]) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<usize>> +'a>>;
-    fn async_read_alloc<'a>(&'a self) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<Vec<u8>>>+ 'a>>;
-    fn async_write<'a>(&'a self, buf: Vec<u8>) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<()>> +'a>>;
-    fn async_flush<'a>(&'a self) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<()>> + 'a >>;
+pub trait AsyncStream : AsyncRead + AsyncWrite +  'static + Send + Sync{ //  + 'static + Send + Sync  {
+//    fn async_read<'a> (&'a self, buf: &'a mut [u8]) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<usize>> +'a>>;
+//    fn async_read_alloc<'a>(&'a self) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<Vec<u8>>>+ 'a>>;
+//    fn async_write<'a>(&'a self, buf: Vec<u8>) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<()>> +'a>>;
+//    fn async_flush<'a>(&'a self) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<()>> + 'a >>;
 }
 
-impl <S: 'static + Sync + Send > AsyncStream for S
-    where
-            for<'a> &'a S: AsyncRead + AsyncWrite  {
-    fn async_read <'a> (&'a self, buf: &'a mut [u8]) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<usize>> + 'a>> {
-        async move {
-            let mut self_ = self;
+impl <S: AsyncRead + AsyncWrite + Sync + Send + 'static>AsyncStream for S {}
+//impl <S: 'static + Sync + Send > AsyncStream for S
+//    where
+//            for<'a> &'a S: AsyncRead + AsyncWrite  {
+//    fn async_read <'a> (&'a self, buf: &'a mut [u8]) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<usize>> + 'a>> {
+//        async move {
+//            let mut self_ = self;
+//
+//            let input = &mut self_;
+//            match tokio::io::read(input , buf).compat().await {
+//                Ok((_stream, _buf , ret)) => return Ok(ret),
+//                Err(e) => return Err(e)
+//            }
+//        }.boxed_local()
+//    }
+//
+//    fn async_read_alloc<'a>(&'a self) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<Vec<u8>>> + 'a >> {
+//        async move {
+//            let vec : Vec<u8> = vec![0; 8192];
+//            let input = &mut {self};
+//            match tokio::io::read(input , vec).compat().await {
+//                Ok((_stream, buf , _ret)) => return Ok(buf),
+//                Err(e) => return Err(e),
+//            }
+//        }.boxed_local()
+//    }
+//
+//    fn async_write<'a>(&'a self, buf: Vec<u8>) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<()>> +'a >> {
+//        async move {
+//            let input = &mut {self};
+//            match tokio::io::write_all(input, buf).compat().await {
+//                Ok((_stream, _buf)) => {return Ok(())},
+//                Err(e) => return Err(e),
+//            }
+//        }.boxed_local()
+//    }
+//
+//    fn async_flush<'a>(&'a self) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<()>> + 'a>> {
+//        async move {
+//            let input = &mut {self};
+//            match tokio::io::flush(input).compat().await {
+//                Err(e) => return Err(e),
+//                _ => return Ok(()),
+//            }
+//        }.boxed_local()
+//    }
+//}
 
-            let input = &mut self_;
-            match tokio::io::read(input , buf).compat().await {
-                Ok((_stream, _buf , ret)) => return Ok(ret),
-                Err(e) => return Err(e)
-            }
-        }.boxed_local()
-    }
-
-    fn async_read_alloc<'a>(&'a self) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<Vec<u8>>> + 'a >> {
-        async move {
-            let vec : Vec<u8> = vec![0; 8192];
-            let input = &mut {self};
-            match tokio::io::read(input , vec).compat().await {
-                Ok((_stream, buf , _ret)) => return Ok(buf),
-                Err(e) => return Err(e),
-            }
-        }.boxed_local()
-    }
-
-    fn async_write<'a>(&'a self, buf: Vec<u8>) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<()>> +'a >> {
-        async move {
-            let input = &mut {self};
-            match tokio::io::write_all(input, buf).compat().await {
-                Ok((_stream, _buf)) => {return Ok(())},
-                Err(e) => return Err(e),
-            }
-        }.boxed_local()
-    }
-
-    fn async_flush<'a>(&'a self) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<()>> + 'a>> {
-        async move {
-            let input = &mut {self};
-            match tokio::io::flush(input).compat().await {
-                Err(e) => return Err(e),
-                _ => return Ok(()),
-            }
-        }.boxed_local()
-    }
-}
-
-
+//impl <S: 'static + Sync + Send> AsyncStream for Mutex<Option<Box<S>>>
+//    where S: AsyncRead + AsyncWrite
+//{
+//    fn async_read <'a> (&'a self, buf: &'a mut [u8]) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<usize>> + 'a>> {
+//        async move {
+//            let mut lock = self.lock().unwrap();
+//            let input = lock.take().unwrap();
+//            match tokio::io::read(input , buf).compat().await {
+//                Ok((stream, _buf , ret)) => {
+//                    lock.replace(stream);
+//                    return Ok(ret);
+//                },
+//                Err(e) => {
+//                    // !!!
+////                    lock.replace(input);
+//                    return Err(e);
+//                }
+//            }
+//        }.boxed_local()
+//    }
+//
+//    fn async_read_alloc<'a>(&'a self) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<Vec<u8>>> + 'a >> {
+//
+//    }
+//
+//    fn async_write<'a>(&'a self, buf: Vec<u8>) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<()>> +'a >> {
+//
+//    }
+//
+//    fn async_flush<'a>(&'a self) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<()>> + 'a>> {
+//
+//    }
+//}
 /// AsyncListener lets an implementation implement a slightly modified form of `std::net::TcpListener::accept`.
 pub trait AsyncListener: 'static + Send {
     /// The enclave may optionally request the local or peer addresses
@@ -251,6 +284,62 @@ pub trait AsyncListener: 'static + Send {
     fn accept<'a>(&'a mut self, local_addr: Option<&'a mut String>, peer_addr: Option<&'a mut String>) -> std::pin::Pin<Box<dyn futures::Future<Output = IoResult<Box<dyn AsyncStream>>> + 'a >>;  //IoResult<Box<dyn AsyncStream>>;
 //    fn next(&mut self) -> futures::stream::Next<'_, Self>
 //        where Self: Unpin;
+}
+
+struct AsyncStreamContainer {
+    inner : Mutex<Option<Box<dyn AsyncStream>>>
+}
+
+impl AsyncStreamContainer {
+    fn new<S: AsyncStream>(s: Box<S>) -> Self {
+        AsyncStreamContainer {inner: Mutex::new(Some(s))}
+    }
+
+    async fn async_read (&self, buf: &mut [u8]) -> IoResult<usize> {
+        let mut lock = self.inner.lock().unwrap();
+        let input = lock.take().unwrap();
+        match tokio::io::read(input , buf).compat().await {
+            Ok((stream, _buf , ret)) => {
+                lock.replace(stream);
+                return Ok(ret);
+            },
+            Err(e) => return Err(e)
+        }
+    }
+    async fn async_read_alloc(& self) -> IoResult<Vec<u8>> {
+        let vec : Vec<u8> = vec![0; 8192];
+        let mut lock = self.inner.lock().unwrap();
+        let input = lock.take().unwrap();
+        match tokio::io::read(input , vec).compat().await {
+            Ok((stream, buf , _ret)) => {
+                lock.replace(stream);
+                return Ok(buf);
+            },
+            Err(e) => return Err(e),
+        }
+    }
+
+    async fn async_write(&self, buf: Vec<u8>) -> IoResult<()> {
+        let mut lock = self.inner.lock().unwrap();
+        let input = lock.take().unwrap();
+        match tokio::io::write_all(input, buf).compat().await {
+            Ok((stream, _buf)) => {
+                lock.replace(stream);
+                return Ok(())
+            },
+            Err(e) => return Err(e),
+        }
+    }
+
+    async fn async_flush (&self) -> IoResult<()> {
+        let mut lock = self.inner.lock().unwrap();
+        let input = lock.take().unwrap();
+        match tokio::io::flush(input).compat().await {
+            Err(e) => return Err(e),
+            Ok(stream) => return Ok(()),
+        }
+    }
+
 }
 
 struct AsyncListenerContainer {
@@ -286,13 +375,13 @@ impl AsyncListener for futures::compat::Compat01As03<tokio::net::tcp::Incoming> 
 }
 
 enum AsyncFileDesc {
-    Stream(Box<dyn AsyncStream>),
+    Stream(AsyncStreamContainer),
     Listener(AsyncListenerContainer),
 }
 
 impl AsyncFileDesc {
     fn stream<S: AsyncStream>(s: S) -> AsyncFileDesc {
-        AsyncFileDesc::Stream(Box::new(s))
+        AsyncFileDesc::Stream(AsyncStreamContainer::new(Box::new(s)))
     }
 
     fn listener<L: AsyncListener>(l: L) -> AsyncFileDesc {
@@ -300,9 +389,9 @@ impl AsyncFileDesc {
         AsyncFileDesc::Listener(AsyncListenerContainer::new(Box::new(l)))
     }
 
-    fn as_stream(& self) -> IoResult<&dyn AsyncStream> {
-        if let AsyncFileDesc::Stream( s) = self {
-            Ok(&**s)
+    fn as_stream(& self) -> IoResult<&AsyncStreamContainer> {
+        if let AsyncFileDesc::Stream( ref s) = self {
+            Ok(s)
         } else {
             Err(IoErrorKind::InvalidInput.into())
         }
@@ -1037,7 +1126,7 @@ impl<'tcs> IOHandlerInput<'tcs> {
         if let Some(peer_addr) = peer_addr {
             peer_addr.set(&peer_addr_str.unwrap().into_bytes()[..])
         }
-        Ok(self.alloc_fd(AsyncFileDesc::Stream(stream)))
+        Ok(self.alloc_fd(AsyncFileDesc::stream(stream)))
     }
 
     #[inline(always)]
@@ -1061,7 +1150,7 @@ impl<'tcs> IOHandlerInput<'tcs> {
             if let Some(peer_addr) = peer_addr {
                 peer_addr.set(peer_addr_str.unwrap().into_bytes());
             }
-            return Ok(self.alloc_fd(AsyncFileDesc::Stream(stream_ext)));
+            return Ok(self.alloc_fd(AsyncFileDesc::stream(stream_ext)));
         }
         let stream = tokio::net::TcpStream::connect(&addr.to_socket_addrs()?.as_mut_slice()[0]).compat().await?;
         if let Some(local_addr) = local_addr {
@@ -1076,7 +1165,7 @@ impl<'tcs> IOHandlerInput<'tcs> {
                 Err(_) => peer_addr.set(&b"error"[..]),
             }
         }
-        Ok(self.alloc_fd(AsyncFileDesc::Stream(Box::new(stream))))
+        Ok(self.alloc_fd(AsyncFileDesc::stream(stream)))
     }
 
     #[inline(always)]
