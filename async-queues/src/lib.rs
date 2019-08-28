@@ -112,8 +112,8 @@ pub struct Slot<T> {
     data: UnsafeCell<T>,
 }*/
 
-pub struct FifoDescriptorContainer<T> {
-    pub inner: FifoDescriptor<T>,
+pub struct FifoDescriptorHandler<T> {
+    resource_type: std::marker::PhantomData<T>,
 }
 
 #[derive(Debug)]
@@ -166,8 +166,8 @@ impl Offsets {
     }
 }
 
-impl<T: Copy> FifoDescriptorContainer<T> {
-    pub fn new(capacity: usize) -> Self {
+impl<T: Copy> FifoDescriptorHandler<T> {
+    pub fn build_new(capacity: usize) -> FifoDescriptor<T> {
         let offsets: Box<AtomicUsize> = Box::new(AtomicUsize::new(0));
         let data: Box<[Slot<T>]> = iter::repeat_with(|| unsafe { mem::zeroed() }).take(capacity).collect::<Vec<_>>()
             .into_boxed_slice();
@@ -177,43 +177,41 @@ impl<T: Copy> FifoDescriptorContainer<T> {
         Self::from_raw(data, capacity, Box::into_raw(offsets))
     }
 
-    pub fn from_raw(data: *mut Slot<T>, capacity: usize, offsets: *mut AtomicUsize) -> Self {
-        FifoDescriptorContainer {
-            inner: FifoDescriptor { data, capacity: capacity as u32, offsets }
-        }
+    pub fn from_raw(data: *mut Slot<T>, capacity: usize, offsets: *mut AtomicUsize) -> FifoDescriptor<T> {
+            FifoDescriptor { data, capacity: capacity as u32, offsets }
     }
 
-    pub fn capacity(&self) -> usize {
-        self.inner.capacity as usize
+    pub fn capacity(fifo: &FifoDescriptor<T>) -> usize {
+        fifo.capacity as usize
     }
 
-    pub unsafe fn len(&self) -> usize {
-        Offsets::from_usize((*self.inner.offsets).load(Ordering::Relaxed)).len(self.inner.capacity)
+    pub unsafe fn len(fifo: &FifoDescriptor<T>) -> usize {
+        Offsets::from_usize((*fifo.offsets).load(Ordering::Relaxed)).len(fifo.capacity)
     }
 
-    pub unsafe fn send(&self, id: usize, data: T) -> Option<bool /* wakeup reader? */> {
+    pub unsafe fn send(fifo: &FifoDescriptor<T>, id: usize, data: T) -> Option<bool /* wakeup reader? */> {
         let (mut old_offsets, mut offsets);
         loop {
             // 1. Load the current offsets.
-            old_offsets = (*self.inner.offsets).load(Ordering::Acquire);
+            old_offsets = (*fifo.offsets).load(Ordering::Acquire);
             offsets = Offsets::from_usize(old_offsets);
 
             // 2. If the queue is full, wait, then go to step 1.
-            if offsets.is_full(self.inner.capacity) {
+            if offsets.is_full(fifo.capacity) {
                 return None
             }
 
             // 3. Add 1 to the write offset and do an atomic compare-and-swap (CAS)
             //    with the current offsets. If the CAS was not succesful, go to step 1.
-            offsets.increment_write_offset(self.inner.capacity);
-            if (*self.inner.offsets).compare_and_swap(old_offsets, offsets.as_usize(), Ordering::Acquire) == old_offsets {
+            offsets.increment_write_offset(fifo.capacity);
+            if (*fifo.offsets).compare_and_swap(old_offsets, offsets.as_usize(), Ordering::Acquire) == old_offsets {
                 break
             }
         }
 
-        let offset = offsets.write_offset(self.inner.capacity);
-        assert!(offset < self.inner.capacity as isize);
-        let slot = &*self.inner.data.offset(offset);
+        let offset = offsets.write_offset(fifo.capacity);
+        assert!(offset < fifo.capacity as isize);
+        let slot = &*fifo.data.offset(offset);
         // 4. Write the data, then the `id`.
         *slot.data.get() = data;
         // Use `Ordering::Release` so that everyone sees the above write to `data` before the non-zero `id`.
@@ -222,9 +220,9 @@ impl<T: Copy> FifoDescriptorContainer<T> {
         Some(Offsets::from_usize(old_offsets).read_blocked)
     }
 
-    pub unsafe fn recv(&self) -> Option<(usize, T, bool /* wakeup writer? */)> {
+    pub unsafe fn recv(fifo: &FifoDescriptor<T>) -> Option<(usize, T, bool /* wakeup writer? */)> {
         // 1. Load the current offsets.
-        let mut old_offsets = (*self.inner.offsets).load(Ordering::Acquire);
+        let mut old_offsets = (*fifo.offsets).load(Ordering::Acquire);
 
         // 2. If the queue is empty, set `read_blocked` and wait
         let mut offsets;
@@ -232,36 +230,36 @@ impl<T: Copy> FifoDescriptorContainer<T> {
             if offsets.read_blocked {
                 return None
             }
-            old_offsets = (*self.inner.offsets).fetch_or(1 << 31, Ordering::Release); // set `read_blocked`
+            old_offsets = (*fifo.offsets).fetch_or(1 << 31, Ordering::Release); // set `read_blocked`
         }
 
         // Unset `read_blocked` in case the above loop set `read_blocked` right after something was sent.
         if offsets.read_blocked {
-            (*self.inner.offsets).fetch_and(!(1 << 31), Ordering::Relaxed);
+            (*fifo.offsets).fetch_and(!(1 << 31), Ordering::Relaxed);
         }
 
         // 3. Add 1 to the read offset.
-        offsets.increment_read_offset(self.inner.capacity);
+        offsets.increment_read_offset(fifo.capacity);
 
         // 4. Read the `id` at the new read offset.
         // 5. If `id` is `0`, go to step 4 (spin). Spinning is OK because data is
         //    expected to be written imminently.
         // 6. Store `0` in the `id` and read the data.
-        let offset = offsets.read_offset(self.inner.capacity);
-        assert!(offset < self.inner.capacity as isize);
-        let slot = &*self.inner.data.offset(offset);
+        let offset = offsets.read_offset(fifo.capacity);
+        assert!(offset < fifo.capacity as isize);
+        let slot = &*fifo.data.offset(offset);
         let id = iter::repeat_with(|| slot.id.load(Ordering::Acquire)).find(|&id| id != 0).unwrap();
         slot.id.store(0, Ordering::Relaxed);
         let data = *slot.data.get();
 
         // 7. Store the new read offset.
         if offsets.read == 0 {
-            (*self.inner.offsets).fetch_sub(((self.inner.capacity << 1) - 1) as usize, Ordering::Release);
+            (*fifo.offsets).fetch_sub(((fifo.capacity << 1) - 1) as usize, Ordering::Release);
         } else {
-            (*self.inner.offsets).fetch_add(1, Ordering::Release);
+            (*fifo.offsets).fetch_add(1, Ordering::Release);
         }
 
         // 8. If the queue was full in step 1, signal the writer to wake up.
-        Some((id, data, Offsets::from_usize(old_offsets).is_full(self.inner.capacity)))
+        Some((id, data, Offsets::from_usize(old_offsets).is_full(fifo.capacity)))
     }
 }

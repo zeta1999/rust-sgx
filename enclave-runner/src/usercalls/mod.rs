@@ -32,7 +32,7 @@ use futures::future::{Either, FutureExt, TryFutureExt};
 use tokio::prelude::{AsyncRead, AsyncWrite, Poll, Async};
 use tokio::sync::lock::Lock;
 use tokio::sync::mpsc as async_mpsc;
-use async_queues::FifoDescriptorContainer;
+use async_queues::FifoDescriptorHandler;
 
 
 use fortanix_sgx_abi::*;
@@ -1296,18 +1296,17 @@ impl<'tcs> IOHandlerInput<'tcs> {
             // !!! calling the function a second time.
             // Should be "equivalent to calling exit(true)"
 //            self.enclave.abort_all_threads();
-//            return EnclaveAbort::Exit { true }
             return Err(IoErrorKind::Other.into());
         }
 
-        let mut uq: Option<FifoDescriptorContainer<Usercall>> = None;
-        let mut rq: Option<FifoDescriptorContainer<Return>> = None;
+        let mut uq: Option<FifoDescriptor<Usercall>> = None;
+        let mut rq: Option<FifoDescriptor<Return>> = None;
         self.enclave.create_fifo_descriptors.call_once( || {
-            uq = Some(FifoDescriptorContainer::new(8));
-            rq = Some(FifoDescriptorContainer::new(8));
+            uq = Some(FifoDescriptorHandler::build_new(8));
+            rq = Some(FifoDescriptorHandler::build_new(8));
         });
-        *usercall_queue = uq.unwrap().inner;
-        *return_queue = rq.unwrap().inner;
+        *usercall_queue = uq.unwrap();
+        *return_queue = rq.unwrap();
 
         Ok(())
     }
