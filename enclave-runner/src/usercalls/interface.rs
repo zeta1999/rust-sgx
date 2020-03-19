@@ -192,7 +192,7 @@ impl<'future, 'ioinput: 'future, 'tcs: 'ioinput> Usercalls<'future> for Handler<
         panic: bool,
     ) -> std::pin::Pin<Box<dyn Future<Output = (Self, EnclaveAbort<bool>)> + 'future>> {
         async move {
-            let ret = self.0.exit(panic);
+            let ret = self.0.exit(panic).await;
             return (self, ret);
         }
             .boxed_local()
