@@ -37,7 +37,7 @@ use std::net::TcpStream;
 use protobuf::ProtobufResult;
 #[cfg(feature = "sgxs")]
 use sgxs::einittoken::{Einittoken, EinittokenProvider};
-#[cfg(feature = "sgxs")]
+#[cfg(not(target_env = "sgx"))]
 use sgx_isa::{Attributes, Sigstruct};
 
 include!(concat!(env!("OUT_DIR"), "/mod_aesm_proto.rs"));
@@ -212,7 +212,7 @@ impl AesmClient {
         )
     }
 
-    #[cfg(feature = "sgxs")]
+    #[cfg(not(target_env = "sgx"))]
     pub fn get_launch_token(
         &self,
         sigstruct: &Sigstruct,
