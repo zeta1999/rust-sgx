@@ -31,12 +31,8 @@ pub struct AesmClient {
 }
 
 impl AesmClient {
-    pub fn new(tcp_stream: TcpStream) -> Self {
-        AesmClient { tcp_stream }
-    }
-
     fn open_socket(&self) -> Result<TcpStream> {
-        let sock = self.tcp_stream.try_clone()?;
+        let sock = self.tcp_stream.try_clone().unwrap();
         // FIXME: uncomment this after resolving https://github.com/fortanix/rust-sgx/issues/31
         // let _ = sock.set_write_timeout(Some(Duration::from_micros(LOCAL_AESM_TIMEOUT_US as _)))?;
         Ok(sock)
@@ -125,5 +121,15 @@ impl AesmClient {
         quote.truncate(new_len);
 
         Ok(QuoteResult::new(quote, qe_report))
+    }
+}
+
+impl crate::sgx::AesmClientExt for crate::AesmClient {
+    fn new(tcp_stream: TcpStream) -> Self {
+        crate::AesmClient {
+            inner: self::AesmClient {
+                tcp_stream
+            }
+        }
     }
 }

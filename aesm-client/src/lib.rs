@@ -31,14 +31,11 @@ extern crate sgx_isa;
 
 #[cfg(feature = "sgxs")]
 use std::result::Result as StdResult;
-#[cfg(target_env = "sgx")]
-use std::net::TcpStream;
 
 use protobuf::ProtobufResult;
 #[cfg(feature = "sgxs")]
 use sgxs::einittoken::{Einittoken, EinittokenProvider};
-#[cfg(not(target_env = "sgx"))]
-#[cfg(feature = "sgxs")]
+#[cfg(all(not(target_env = "sgx"),feature = "sgxs"))]
 use sgx_isa::{Attributes, Sigstruct};
 
 include!(concat!(env!("OUT_DIR"), "/mod_aesm_proto.rs"));
@@ -59,6 +56,14 @@ pub mod unix {
     use std::path::Path;
     pub trait AesmClientExt {
         fn with_path<P: AsRef<Path>>(path: P) -> Self;
+    }
+}
+
+#[cfg(target_env = "sgx")]
+pub mod sgx {
+    use std::net::TcpStream;
+    pub trait AesmClientExt {
+        fn new(tcp_stream: TcpStream) -> Self;
     }
 }
 
@@ -157,14 +162,8 @@ impl QuoteResult {
     }
 }
 
-#[cfg(not(target_env = "sgx"))]
-#[derive(Default, Debug, Clone)]
-pub struct AesmClient {
-    inner: imp::AesmClient
-}
-
 // TODO: Find a better alternative to removing Clone and Default trait
-#[cfg(target_env = "sgx")]
+#[cfg_attr(not(target_env = "sgx"), derive(Default,Clone))]
 #[derive(Debug)]
 pub struct AesmClient {
     inner: imp::AesmClient
@@ -175,10 +174,6 @@ impl AesmClient {
     #[cfg(not(target_env = "sgx"))]
     pub fn new() -> Self {
         AesmClient { inner: imp::AesmClient::new() }
-    }
-    #[cfg(target_env = "sgx")]
-    pub fn new(tcp_stream: TcpStream) -> Self {
-        AesmClient { inner: imp::AesmClient::new(tcp_stream) }
     }
 
     /// Test the connection with AESM.
@@ -213,8 +208,7 @@ impl AesmClient {
         )
     }
 
-    #[cfg(not(target_env = "sgx"))]
-    #[cfg(feature = "sgxs")]
+    #[cfg(all(not(target_env = "sgx"), feature = "sgxs"))]
     pub fn get_launch_token(
         &self,
         sigstruct: &Sigstruct,
