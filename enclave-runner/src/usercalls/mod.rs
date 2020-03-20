@@ -702,9 +702,19 @@ impl EnclaveState {
                                 work_sender: &work_sender,
                             };
                             let handler = Handler(&mut input);
-                            let (_handler, result) = {
+                            let result = {
                                 let (p1, p2, p3, p4, p5) = usercall.parameters();
-                                dispatch(handler, p1, p2, p3, p4, p5).await
+                                let exit_waiter = async {
+                                    let mut stream = enclave_clone.exit_rx.clone();
+                                    while let Ok((Some(false), s)) = stream.into_future().compat().await {
+                                        stream = s;
+                                    }
+                                    Err(EnclaveAbort::Secondary)
+                                }.boxed_local();
+                                match futures::future::select(exit_waiter, dispatch(handler, p1, p2, p3, p4, p5).boxed_local()).await {
+                                    Either::Left((x, _)) => x,
+                                    Either::Right((y, _)) => y.1,
+                                }
                             };
                             let ret = match result {
                                 Ok(ret) => {
@@ -1092,23 +1102,6 @@ impl<T: UsercallExtension> From<T> for Box<dyn UsercallExtension> {
 struct UsercallExtensionDefault;
 impl UsercallExtension for UsercallExtensionDefault {}
 
-macro_rules! with_exit_handler {
-    ($enclave:expr, $f:expr) => {{
-        let f1 = async { $f }.boxed_local();
-        let f2 = async {
-            let mut stream = $enclave.exit_rx.clone();
-            while let Ok((Some(false), s)) = stream.into_future().compat().await {
-                stream = s;
-            }
-            Err(io::Error::from(IoErrorKind::Other))
-        }.boxed_local();
-        match futures::future::select(f1, f2).await {
-            Either::Left((x, _)) => x,
-            Either::Right((y, _)) => y,
-        }
-    }}
-}
-
 impl<'tcs> IOHandlerInput<'tcs> {
     async fn lookup_fd(&self, fd: Fd) -> IoResult<Arc<AsyncFileDesc>> {
         match poll_lock_await_unwrap!(self.enclave.fds).get(&fd) {
@@ -1136,45 +1129,34 @@ impl<'tcs> IOHandlerInput<'tcs> {
 
     #[inline(always)]
     async fn read(&self, fd: Fd, buf: &mut [u8]) -> IoResult<usize> {
-        with_exit_handler!{self.enclave, {
-            let file_desc = self.lookup_fd(fd).await?;
-            file_desc.as_stream()?.async_read(buf).await
-        }}
+        let file_desc = self.lookup_fd(fd).await?;
+        file_desc.as_stream()?.async_read(buf).await
     }
 
     #[inline(always)]
     async fn read_alloc(&self, fd: Fd, buf: &mut OutputBuffer<'tcs>) -> IoResult<()> {
-        with_exit_handler!{self.enclave, {
-            let file_desc = self.lookup_fd(fd).await?;
-            let v = file_desc.as_stream()?.async_read_alloc().await?;
-            buf.set(v);
-            Ok(())
-        }}
+        let file_desc = self.lookup_fd(fd).await?;
+        let v = file_desc.as_stream()?.async_read_alloc().await?;
+        buf.set(v);
+        Ok(())
     }
 
     #[inline(always)]
     async fn write(&self, fd: Fd, buf: &[u8]) -> IoResult<usize> {
-        with_exit_handler!{self.enclave, {
-            let vec = buf.to_vec();
-            let file_desc = self.lookup_fd(fd).await?;
-            file_desc.as_stream()?.async_write(vec).await
-        }}
+        let vec = buf.to_vec();
+        let file_desc = self.lookup_fd(fd).await?;
+        file_desc.as_stream()?.async_write(vec).await
     }
 
     #[inline(always)]
     async fn flush(&self, fd: Fd) -> IoResult<()> {
-        with_exit_handler!{self.enclave, {
-            let file_desc = self.lookup_fd(fd).await?;
-            file_desc.as_stream()?.async_flush().await
-        }}
+        let file_desc = self.lookup_fd(fd).await?;
+        file_desc.as_stream()?.async_flush().await
     }
 
     #[inline(always)]
     async fn close(&self, fd: Fd) {
-        let _ = with_exit_handler!{self.enclave, {
-            poll_lock_await_unwrap!(self.enclave.fds).remove(&fd);
-            Ok(())
-        }};
+        poll_lock_await_unwrap!(self.enclave.fds).remove(&fd);
     }
 
     #[inline(always)]
@@ -1183,27 +1165,25 @@ impl<'tcs> IOHandlerInput<'tcs> {
         addr: &[u8],
         local_addr: Option<&mut OutputBuffer<'tcs>>,
     ) -> IoResult<Fd> {
-        with_exit_handler!{self.enclave, {
-            let addr = str::from_utf8(addr).map_err(|_| IoErrorKind::ConnectionRefused)?;
-            let mut local_addr_str = local_addr.as_ref().map(|_| String::new());
-            if let Some(stream_ext) = self
-                .enclave
-                .usercall_ext
-                .bind_stream(&addr, local_addr_str.as_mut())?
-            {
-                if let Some(local_addr) = local_addr {
-                    local_addr.set(local_addr_str.unwrap().into_bytes());
-                }
-                return Ok(self.alloc_fd(AsyncFileDesc::listener(stream_ext)).await);
-            }
-
-            let socket = tokio::net::TcpListener::bind(&addr.to_socket_addrs()?.next().unwrap())?;
+        let addr = str::from_utf8(addr).map_err(|_| IoErrorKind::ConnectionRefused)?;
+        let mut local_addr_str = local_addr.as_ref().map(|_| String::new());
+        if let Some(stream_ext) = self
+            .enclave
+            .usercall_ext
+            .bind_stream(&addr, local_addr_str.as_mut())?
+        {
             if let Some(local_addr) = local_addr {
-                local_addr.set(socket.local_addr()?.to_string().into_bytes());
+                local_addr.set(local_addr_str.unwrap().into_bytes());
             }
-            let socket = socket.incoming();
-            Ok(self.alloc_fd(AsyncFileDesc::listener(Box::new(socket))).await)
-        }}
+            return Ok(self.alloc_fd(AsyncFileDesc::listener(stream_ext)).await);
+        }
+
+        let socket = tokio::net::TcpListener::bind(&addr.to_socket_addrs()?.next().unwrap())?;
+        if let Some(local_addr) = local_addr {
+            local_addr.set(socket.local_addr()?.to_string().into_bytes());
+        }
+        let socket = socket.incoming();
+        Ok(self.alloc_fd(AsyncFileDesc::listener(Box::new(socket))).await)
     }
 
     #[inline(always)]
@@ -1213,21 +1193,19 @@ impl<'tcs> IOHandlerInput<'tcs> {
         local_addr: Option<&mut OutputBuffer<'tcs>>,
         peer_addr: Option<&mut OutputBuffer<'tcs>>,
     ) -> IoResult<Fd> {
-        with_exit_handler!{self.enclave, {
-            let mut local_addr_str = local_addr.as_ref().map(|_| String::new());
-            let mut peer_addr_str = peer_addr.as_ref().map(|_| String::new());
+        let mut local_addr_str = local_addr.as_ref().map(|_| String::new());
+        let mut peer_addr_str = peer_addr.as_ref().map(|_| String::new());
 
-            let file_desc = self.lookup_fd(fd).await?;
-            let stream = file_desc.as_listener()?.async_accept(local_addr_str.as_mut(), peer_addr_str.as_mut()).await?.unwrap();
+        let file_desc = self.lookup_fd(fd).await?;
+        let stream = file_desc.as_listener()?.async_accept(local_addr_str.as_mut(), peer_addr_str.as_mut()).await?.unwrap();
 
-            if let Some(local_addr) = local_addr {
-                local_addr.set(&local_addr_str.unwrap().into_bytes()[..])
-            }
-            if let Some(peer_addr) = peer_addr {
-                peer_addr.set(&peer_addr_str.unwrap().into_bytes()[..])
-            }
-            Ok(self.alloc_fd(AsyncFileDesc::stream(stream)).await)
-        }}
+        if let Some(local_addr) = local_addr {
+            local_addr.set(&local_addr_str.unwrap().into_bytes()[..])
+        }
+        if let Some(peer_addr) = peer_addr {
+            peer_addr.set(&peer_addr_str.unwrap().into_bytes()[..])
+        }
+        Ok(self.alloc_fd(AsyncFileDesc::stream(stream)).await)
     }
 
     #[inline(always)]
@@ -1237,51 +1215,49 @@ impl<'tcs> IOHandlerInput<'tcs> {
         local_addr: Option<&mut OutputBuffer<'tcs>>,
         peer_addr: Option<&mut OutputBuffer<'tcs>>,
     ) -> IoResult<Fd> {
-        with_exit_handler!{self.enclave, {
-            let addr = str::from_utf8(addr).map_err(|_| IoErrorKind::ConnectionRefused)?;
-            let mut local_addr_str = local_addr.as_ref().map(|_| String::new());
-            let mut peer_addr_str = peer_addr.as_ref().map(|_| String::new());
-            if let Some(stream_ext) = self.enclave.usercall_ext.connect_stream(
-                &addr,
-                local_addr_str.as_mut(),
-                peer_addr_str.as_mut(),
-            ).await? {
-                if let Some(local_addr) = local_addr {
-                    local_addr.set(local_addr_str.unwrap().into_bytes());
-                }
-                if let Some(peer_addr) = peer_addr {
-                    peer_addr.set(peer_addr_str.unwrap().into_bytes());
-                }
-                return Ok(self.alloc_fd(AsyncFileDesc::stream(stream_ext)).await);
-            }
-
-            // try to connect to all socket addresses one by one
-            let mut stream = None;
-            for socket_addr in addr.to_socket_addrs()? {
-                stream = Some(tokio::net::TcpStream::connect(&socket_addr).compat().await);
-                if stream.as_ref().unwrap().is_ok() {
-                    break;
-                }
-            }
-            let stream = match stream {
-                None => return Err(IoErrorKind::InvalidInput.into()),
-                Some(s) => s?
-            };
-
+        let addr = str::from_utf8(addr).map_err(|_| IoErrorKind::ConnectionRefused)?;
+        let mut local_addr_str = local_addr.as_ref().map(|_| String::new());
+        let mut peer_addr_str = peer_addr.as_ref().map(|_| String::new());
+        if let Some(stream_ext) = self.enclave.usercall_ext.connect_stream(
+            &addr,
+            local_addr_str.as_mut(),
+            peer_addr_str.as_mut(),
+        ).await? {
             if let Some(local_addr) = local_addr {
-                match stream.local_addr() {
-                    Ok(local) => local_addr.set(local.to_string().into_bytes()),
-                    Err(_) => local_addr.set(&b"error"[..]),
-                }
+                local_addr.set(local_addr_str.unwrap().into_bytes());
             }
             if let Some(peer_addr) = peer_addr {
-                match stream.peer_addr() {
-                    Ok(peer) => peer_addr.set(peer.to_string().into_bytes()),
-                    Err(_) => peer_addr.set(&b"error"[..]),
-                }
+                peer_addr.set(peer_addr_str.unwrap().into_bytes());
             }
-            Ok(self.alloc_fd(AsyncFileDesc::stream(Box::new(stream))).await)
-        }}
+            return Ok(self.alloc_fd(AsyncFileDesc::stream(stream_ext)).await);
+        }
+
+        // try to connect to all socket addresses one by one
+        let mut stream = None;
+        for socket_addr in addr.to_socket_addrs()? {
+            stream = Some(tokio::net::TcpStream::connect(&socket_addr).compat().await);
+            if stream.as_ref().unwrap().is_ok() {
+                break;
+            }
+        }
+        let stream = match stream {
+            None => return Err(IoErrorKind::InvalidInput.into()),
+            Some(s) => s?
+        };
+
+        if let Some(local_addr) = local_addr {
+            match stream.local_addr() {
+                Ok(local) => local_addr.set(local.to_string().into_bytes()),
+                Err(_) => local_addr.set(&b"error"[..]),
+            }
+        }
+        if let Some(peer_addr) = peer_addr {
+            match stream.peer_addr() {
+                Ok(peer) => peer_addr.set(peer.to_string().into_bytes()),
+                Err(_) => peer_addr.set(&b"error"[..]),
+            }
+        }
+        Ok(self.alloc_fd(AsyncFileDesc::stream(Box::new(stream))).await)
     }
 
     #[inline(always)]
