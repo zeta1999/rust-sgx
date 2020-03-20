@@ -1,4 +1,3 @@
-use std::time::Duration;
 use std::net::TcpStream;
 use std::io::{Read,Write};
 
@@ -11,6 +10,9 @@ use {
     Request_GetQuoteRequest, Request_InitQuoteRequest,
 };
 
+/*
+// FIXME: uncomment this after resolving https://github.com/fortanix/rust-sgx/issues/31
+use std::time::Duration;
 /// This timeout is an argument in AESM request protobufs.
 ///
 /// This value should be used for requests that can be completed locally, i.e.
@@ -21,6 +23,7 @@ const LOCAL_AESM_TIMEOUT_US: u32 = 1_000_000;
 /// This value should be used for requests that might need interaction with
 /// remote servers, such as provisioning EPID.
 const REMOTE_AESM_TIMEOUT_US: u32 = 30_000_000;
+*/
 
 #[derive(Debug)]
 pub struct AesmClient {
@@ -34,7 +37,8 @@ impl AesmClient {
 
     fn open_socket(&self) -> Result<TcpStream> {
         let sock = self.tcp_stream.try_clone()?;
-        let _ = sock.set_write_timeout(Some(Duration::from_micros(LOCAL_AESM_TIMEOUT_US as _)))?;
+        // FIXME: uncomment this after resolving https://github.com/fortanix/rust-sgx/issues/31
+        // let _ = sock.set_write_timeout(Some(Duration::from_micros(LOCAL_AESM_TIMEOUT_US as _)))?;
         Ok(sock)
     }
 
@@ -45,7 +49,8 @@ impl AesmClient {
     fn transact<T: AesmRequest>(&self, req: T) -> Result<T::Response> {
         let mut sock = self.open_socket()?;
 
-        let _ = sock.set_read_timeout(req.get_timeout().map(|t| Duration::from_micros(t as _)))?;
+        // FIXME: uncomment this after resolving https://github.com/fortanix/rust-sgx/issues/31
+        // let _ = sock.set_read_timeout(req.get_timeout().map(|t| Duration::from_micros(t as _)))?;
 
         let req_bytes = req
             .into()
@@ -64,8 +69,9 @@ impl AesmClient {
 
     /// Obtain target info from QE.
     pub fn init_quote(&self) -> Result<QuoteInfo> {
-        let mut req = Request_InitQuoteRequest::new();
-        req.set_timeout(LOCAL_AESM_TIMEOUT_US);
+        let req = Request_InitQuoteRequest::new();
+        // FIXME: uncomment this after resolving https://github.com/fortanix/rust-sgx/issues/31
+        // req.set_timeout(LOCAL_AESM_TIMEOUT_US);
 
         let mut res = self.transact(req)?;
 
@@ -97,7 +103,9 @@ impl AesmClient {
             req.set_sig_rl(sig_rl);
         }
         req.set_qe_report(true);
-        req.set_timeout(REMOTE_AESM_TIMEOUT_US);
+
+        // FIXME: uncomment this after resolving https://github.com/fortanix/rust-sgx/issues/31
+        // req.set_timeout(REMOTE_AESM_TIMEOUT_US);
 
         let mut res = self.transact(req)?;
 
