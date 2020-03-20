@@ -7,13 +7,16 @@ use std::time::Duration;
 use byteorder::{LittleEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
 use protobuf::Message;
 use unix_socket::UnixStream;
+#[cfg(feature = "sgxs")]
 use sgxs::sigstruct::{Attributes, Sigstruct};
 
 pub use error::{AesmError, Error, Result};
 use {
-        AesmRequest, FromResponse, QuoteInfo, QuoteResult, QuoteType, Request_GetLaunchTokenRequest,
+        AesmRequest, FromResponse, QuoteInfo, QuoteResult, QuoteType,
         Request_GetQuoteRequest, Request_InitQuoteRequest,
 };
+#[cfg(feature = "sgxs")]
+use Request_GetLaunchTokenRequest;
 
 /// This timeout is an argument in AESM request protobufs.
 ///
@@ -150,6 +153,7 @@ impl AesmClient {
     }
 
     /// Obtain launch token
+    #[cfg(feature = "sgxs")]
     pub fn get_launch_token(
         &self,
         sigstruct: &Sigstruct,

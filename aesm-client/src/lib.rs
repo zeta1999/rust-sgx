@@ -38,6 +38,7 @@ use protobuf::ProtobufResult;
 #[cfg(feature = "sgxs")]
 use sgxs::einittoken::{Einittoken, EinittokenProvider};
 #[cfg(not(target_env = "sgx"))]
+#[cfg(feature = "sgxs")]
 use sgx_isa::{Attributes, Sigstruct};
 
 include!(concat!(env!("OUT_DIR"), "/mod_aesm_proto.rs"));
@@ -213,6 +214,7 @@ impl AesmClient {
     }
 
     #[cfg(not(target_env = "sgx"))]
+    #[cfg(feature = "sgxs")]
     pub fn get_launch_token(
         &self,
         sigstruct: &Sigstruct,
