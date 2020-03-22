@@ -30,6 +30,14 @@ pub struct AesmClient {
     tcp_stream: TcpStream,
 }
 
+impl Clone for AesmClient {
+    fn clone(&self) -> Self {
+        AesmClient {
+            tcp_stream: self.tcp_stream.try_clone().unwrap()
+        }
+    }
+}
+
 impl AesmClient {
     fn open_socket(&self) -> Result<TcpStream> {
         let sock = self.tcp_stream.try_clone().unwrap();

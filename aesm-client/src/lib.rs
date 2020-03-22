@@ -163,8 +163,8 @@ impl QuoteResult {
 }
 
 // TODO: Find a better alternative to removing Clone and Default trait
-#[cfg_attr(not(target_env = "sgx"), derive(Default,Clone))]
-#[derive(Debug)]
+#[cfg_attr(not(target_env = "sgx"), derive(Default))]
+#[derive(Debug, Clone)]
 pub struct AesmClient {
     inner: imp::AesmClient
 }
